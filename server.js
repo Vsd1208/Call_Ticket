@@ -4,14 +4,42 @@ const fs = require("fs");
 const path = require("path");
 const querystring = require("querystring");
 
+loadLocalEnv();
+
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 const DUMMY_TOLL_FREE_NUMBER = process.env.DUMMY_TOLL_FREE_NUMBER || "+18005550199";
+const EXOTEL_EXOPHONE = process.env.EXOTEL_EXOPHONE || "04048218468";
+const EXOTEL_TRIAL_NUMBER = process.env.EXOTEL_TRIAL_NUMBER || "09513886363";
+const EXOTEL_APP_ID = process.env.EXOTEL_APP_ID || "1230481";
 const ROOT = __dirname;
 
 const sessions = new Map();
 const payments = new Map();
 const smsOutbox = [];
+const voicebotEvents = [];
+
+function loadLocalEnv() {
+  const envPath = path.join(__dirname, ".env");
+  if (!fs.existsSync(envPath)) return;
+
+  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const separator = trimmed.indexOf("=");
+    if (separator === -1) continue;
+
+    const key = trimmed.slice(0, separator).trim();
+    let value = trimmed.slice(separator + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+
+    if (!process.env[key]) process.env[key] = value;
+  }
+}
 
 const stations = [
   { name: "Delhi", aliases: ["delhi", "new delhi", "dilli"] },
@@ -272,6 +300,13 @@ function sendJson(res, status, value) {
   send(res, status, "application/json; charset=utf-8", JSON.stringify(value, null, 2));
 }
 
+function publicWsBaseUrl() {
+  const base = PUBLIC_BASE_URL.replace(/\/$/, "");
+  if (base.startsWith("https://")) return base.replace("https://", "wss://");
+  if (base.startsWith("http://")) return base.replace("http://", "ws://");
+  return `ws://${base}`;
+}
+
 function serveStatic(req, res) {
   const requested = decodeURIComponent(new URL(req.url, PUBLIC_BASE_URL).pathname);
   const safePath = path.normalize(requested === "/" ? "/index.html" : requested).replace(/^(\.\.[/\\])+/, "");
@@ -295,8 +330,20 @@ function twilioReady() {
   return Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER);
 }
 
+function exotelReady() {
+  return Boolean(process.env.EXOTEL_ACCOUNT_SID && process.env.EXOTEL_API_KEY && process.env.EXOTEL_API_TOKEN && EXOTEL_EXOPHONE && EXOTEL_APP_ID);
+}
+
+function liveProvider() {
+  if (exotelReady()) return "exotel";
+  if (twilioReady()) return "twilio";
+  return "simulation";
+}
+
 function activePhoneNumber() {
-  return process.env.TWILIO_FROM_NUMBER || DUMMY_TOLL_FREE_NUMBER;
+  if (exotelReady()) return EXOTEL_EXOPHONE;
+  if (twilioReady()) return process.env.TWILIO_FROM_NUMBER;
+  return DUMMY_TOLL_FREE_NUMBER;
 }
 
 function recordSms(to, message, reference = "") {
@@ -364,6 +411,59 @@ function startTwilioCall(to) {
   });
 }
 
+function exotelSubdomain() {
+  return process.env.EXOTEL_SUBDOMAIN || "api.in.exotel.com";
+}
+
+function exotelFlowUrl() {
+  return process.env.EXOTEL_FLOW_URL || `http://my.exotel.com/${process.env.EXOTEL_ACCOUNT_SID}/exoml/start_voice/${EXOTEL_APP_ID}`;
+}
+
+function startExotelCall(to) {
+  return new Promise((resolve, reject) => {
+    const accountSid = process.env.EXOTEL_ACCOUNT_SID;
+    const apiKey = process.env.EXOTEL_API_KEY;
+    const apiToken = process.env.EXOTEL_API_TOKEN;
+    const postData = querystring.stringify({
+      From: to,
+      CallerId: EXOTEL_EXOPHONE,
+      Url: exotelFlowUrl(),
+      CallType: "trans",
+      StatusCallback: `${PUBLIC_BASE_URL.replace(/\/$/, "")}/exotel/status`
+    });
+
+    const req = https.request(
+      {
+        hostname: exotelSubdomain(),
+        path: `/v1/Accounts/${encodeURIComponent(accountSid)}/Calls/connect.json`,
+        method: "POST",
+        auth: `${apiKey}:${apiToken}`,
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Length": Buffer.byteLength(postData)
+        }
+      },
+      (response) => {
+        let body = "";
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            resolve(JSON.parse(body));
+          } else {
+            reject(new Error(`Exotel returned ${response.statusCode}: ${body}`));
+          }
+        });
+      }
+    );
+
+    req.on("error", reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
 function sendTwilioSms(to, message) {
   return new Promise((resolve, reject) => {
     const accountSid = process.env.TWILIO_ACCOUNT_SID;
@@ -403,14 +503,64 @@ function sendTwilioSms(to, message) {
   });
 }
 
+function sendExotelSms(to, message) {
+  return new Promise((resolve, reject) => {
+    const accountSid = process.env.EXOTEL_ACCOUNT_SID;
+    const apiKey = process.env.EXOTEL_API_KEY;
+    const apiToken = process.env.EXOTEL_API_TOKEN;
+    const postData = querystring.stringify({
+      From: EXOTEL_EXOPHONE,
+      To: to,
+      Body: message,
+      StatusCallback: `${PUBLIC_BASE_URL.replace(/\/$/, "")}/exotel/sms-status`
+    });
+
+    const req = https.request(
+      {
+        hostname: exotelSubdomain(),
+        path: `/v1/Accounts/${encodeURIComponent(accountSid)}/Sms/send.json`,
+        method: "POST",
+        auth: `${apiKey}:${apiToken}`,
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Content-Length": Buffer.byteLength(postData)
+        }
+      },
+      (response) => {
+        let body = "";
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            resolve(JSON.parse(body));
+          } else {
+            reject(new Error(`Exotel SMS returned ${response.statusCode}: ${body}`));
+          }
+        });
+      }
+    );
+
+    req.on("error", reject);
+    req.write(postData);
+    req.end();
+  });
+}
+
 async function sendPaymentSms(to, message, reference) {
+  if (exotelReady()) {
+    const sent = await sendExotelSms(to, message);
+    const sms = sent.SMSMessage || sent.sms || sent;
+    return { sent: true, simulated: false, provider: "exotel", providerId: sms.Sid || sms.sid || "" };
+  }
+
   if (twilioReady()) {
     const sent = await sendTwilioSms(to, message);
-    return { sent: true, simulated: false, providerId: sent.sid };
+    return { sent: true, simulated: false, provider: "twilio", providerId: sent.sid };
   }
 
   const simulated = recordSms(to, message, reference);
-  return { sent: true, simulated: true, providerId: simulated.id };
+  return { sent: true, simulated: true, provider: "simulation", providerId: simulated.id };
 }
 
 async function createPaymentLink(session) {
@@ -438,17 +588,33 @@ async function createPaymentLink(session) {
 
 async function handleApi(req, res, url) {
   if (url.pathname === "/api/call/config" && req.method === "GET") {
+    const provider = liveProvider();
     sendJson(res, 200, {
-      ready: twilioReady(),
-      mode: twilioReady() ? "live" : "simulation",
+      ready: provider !== "simulation",
+      provider,
+      mode: provider === "simulation" ? "simulation" : "live",
       callableNumber: activePhoneNumber(),
       dummyTollFreeNumber: DUMMY_TOLL_FREE_NUMBER,
+      exotel: {
+        configured: exotelReady(),
+        exophone: EXOTEL_EXOPHONE,
+        trialNumber: EXOTEL_TRIAL_NUMBER,
+        appId: EXOTEL_APP_ID,
+        flowUrl: process.env.EXOTEL_ACCOUNT_SID ? exotelFlowUrl() : "",
+        voicebotConfigUrl: `${PUBLIC_BASE_URL.replace(/\/$/, "")}/exotel/voicebot-config`,
+        voicebotWsUrl: `${publicWsBaseUrl()}/exotel/voicebot`,
+        outboundStatusCallback: `${PUBLIC_BASE_URL.replace(/\/$/, "")}/exotel/status`,
+        passthruUrl: `${PUBLIC_BASE_URL.replace(/\/$/, "")}/exotel/passthru`
+      },
       publicBaseUrl: PUBLIC_BASE_URL,
       inboundWebhook: `${PUBLIC_BASE_URL.replace(/\/$/, "")}/voice/incoming`,
-      supportsSmsPaymentLinks: twilioReady(),
+      supportsSmsPaymentLinks: exotelReady() || twilioReady(),
       supportsSimulatedSms: true,
       simulatorEndpoint: "/api/simulate/call",
-      requiredEnv: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "PUBLIC_BASE_URL"]
+      requiredEnv: {
+        exotel: ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOTEL_EXOPHONE", "EXOTEL_APP_ID", "PUBLIC_BASE_URL"],
+        twilio: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "PUBLIC_BASE_URL"]
+      }
     });
     return;
   }
@@ -462,7 +628,8 @@ async function handleApi(req, res, url) {
       return;
     }
 
-    if (!twilioReady()) {
+    const provider = liveProvider();
+    if (provider === "simulation") {
       sendJson(res, 200, {
         ok: true,
         simulated: true,
@@ -474,8 +641,15 @@ async function handleApi(req, res, url) {
     }
 
     try {
+      if (provider === "exotel") {
+        const result = await startExotelCall(to);
+        const call = result.Call || result.call || result;
+        sendJson(res, 200, { ok: true, provider, callSid: call.Sid || call.sid || "", status: call.Status || call.status || "requested" });
+        return;
+      }
+
       const call = await startTwilioCall(to);
-      sendJson(res, 200, { ok: true, callSid: call.sid, status: call.status });
+      sendJson(res, 200, { ok: true, provider, callSid: call.sid, status: call.status });
     } catch (error) {
       sendJson(res, 502, { ok: false, error: error.message });
     }
@@ -511,6 +685,11 @@ async function handleApi(req, res, url) {
 
   if (url.pathname === "/api/sms/outbox" && req.method === "GET") {
     sendJson(res, 200, { ok: true, messages: smsOutbox.slice().reverse() });
+    return;
+  }
+
+  if (url.pathname === "/api/voicebot/events" && req.method === "GET") {
+    sendJson(res, 200, { ok: true, events: voicebotEvents.slice().reverse() });
     return;
   }
 
@@ -551,6 +730,85 @@ async function handleApi(req, res, url) {
   }
 
   sendJson(res, 404, { ok: false, error: "API route not found." });
+}
+
+async function handleExotel(req, res, url) {
+  if (url.pathname === "/exotel/voicebot-config") {
+    sendJson(res, 200, {
+      ws_url: `${publicWsBaseUrl()}/exotel/voicebot`,
+      websocket_url: `${publicWsBaseUrl()}/exotel/voicebot`,
+      status_callback: `${PUBLIC_BASE_URL.replace(/\/$/, "")}/exotel/status`
+    });
+    return;
+  }
+
+  const params = req.method === "GET" ? Object.fromEntries(url.searchParams.entries()) : querystring.parse(await readBody(req));
+  const event = {
+    receivedAt: new Date().toISOString(),
+    route: url.pathname,
+    callSid: params.CallSid || params.callsid || "",
+    from: params.CallFrom || params.callfrom || params.From || params.from || "",
+    to: params.CallTo || params.callto || params.To || params.to || "",
+    status: params.CallStatus || params.callstatus || params.Status || params.status || "",
+    direction: params.Direction || params.direction || "",
+    recordingUrl: params.RecordingUrl || params.recordingurl || "",
+    raw: params
+  };
+
+  console.log(`Exotel ${url.pathname}: ${JSON.stringify(event)}`);
+  sendJson(res, 200, { ok: true, event });
+}
+
+function websocketAcceptKey(key) {
+  return require("crypto")
+    .createHash("sha1")
+    .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+    .digest("base64");
+}
+
+function sendWsFrame(socket, text) {
+  const payload = Buffer.from(text);
+  const header = payload.length < 126
+    ? Buffer.from([0x81, payload.length])
+    : Buffer.from([0x81, 126, payload.length >> 8, payload.length & 0xff]);
+  socket.write(Buffer.concat([header, payload]));
+}
+
+function handleVoicebotSocket(req, socket) {
+  const key = req.headers["sec-websocket-key"];
+  if (!key) {
+    socket.destroy();
+    return;
+  }
+
+  socket.write([
+    "HTTP/1.1 101 Switching Protocols",
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Accept: ${websocketAcceptKey(key)}`,
+    "",
+    ""
+  ].join("\r\n"));
+
+  const event = {
+    connectedAt: new Date().toISOString(),
+    remoteAddress: socket.remoteAddress,
+    note: "Voicebot websocket connected. This placeholder logs traffic; connect an AI speech engine here for live conversation."
+  };
+  voicebotEvents.push(event);
+  sendWsFrame(socket, JSON.stringify({ type: "ready", message: "Call Ticket voicebot websocket connected." }));
+
+  socket.on("data", (buffer) => {
+    voicebotEvents.push({
+      receivedAt: new Date().toISOString(),
+      bytes: buffer.length,
+      previewHex: buffer.subarray(0, 24).toString("hex")
+    });
+  });
+
+  socket.on("close", () => {
+    voicebotEvents.push({ disconnectedAt: new Date().toISOString() });
+  });
 }
 
 async function handleVoice(req, res, url) {
@@ -670,6 +928,11 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (url.pathname.startsWith("/exotel/")) {
+      await handleExotel(req, res, url);
+      return;
+    }
+
     if (url.pathname.startsWith("/pay/")) {
       servePaymentPage(res, decodeURIComponent(url.pathname.replace("/pay/", "")));
       return;
@@ -681,8 +944,19 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.on("upgrade", (req, socket) => {
+  const url = new URL(req.url, PUBLIC_BASE_URL);
+  if (url.pathname === "/exotel/voicebot") {
+    handleVoicebotSocket(req, socket);
+    return;
+  }
+
+  socket.destroy();
+});
+
 server.listen(PORT, () => {
   console.log(`Call Ticket app: http://localhost:${PORT}`);
   console.log(`Dummy toll-free number: ${DUMMY_TOLL_FREE_NUMBER}`);
+  console.log(`Exotel ExoPhone: ${EXOTEL_EXOPHONE}`);
   console.log(`Inbound voice webhook: ${PUBLIC_BASE_URL.replace(/\/$/, "")}/voice/incoming`);
 });

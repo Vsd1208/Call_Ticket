@@ -60,6 +60,16 @@ The included dummy toll-free-style number is:
 
 That number is for local demos only. It is not actually callable until you replace it with a real provider number.
 
+Your Exotel screenshot details have been added as configuration defaults:
+
+- ExoPhone: `04048218468`
+- Trial number: `09513886363`
+- App ID: `1230481`
+- Account SID: `srmuniversity3`
+- Region: Singapore / `api.exotel.com`
+
+See `EXOTEL_SETUP.md` for the exact Exotel environment variables and webhook URLs. The trial PIN is intentionally not stored in this repo.
+
 Start the local server:
 
 ```bash
@@ -79,6 +89,11 @@ The server exposes:
 - `POST /api/simulate/call` - simulates a complete phone conversation without Twilio.
 - `GET /api/sms/outbox` - shows simulated SMS payment links when Twilio is not configured.
 - `POST /api/payment/create` - creates a payment link for the browser demo.
+- `GET|POST /exotel/status` - receives Exotel call status callbacks.
+- `GET|POST /exotel/passthru` - receives Exotel Passthru call details.
+- `GET /exotel/voicebot-config` - returns the websocket URL for the Exotel Voicebot applet.
+- `WS /exotel/voicebot` - receives Exotel Voicebot websocket traffic.
+- `GET /api/voicebot/events` - shows recent Voicebot websocket connection events.
 - `POST /voice/incoming` - webhook for an incoming call.
 - `POST /voice/process` - receives speech results and continues the booking conversation.
 - `GET /pay/:reference` - demo payment page.
@@ -93,7 +108,7 @@ During a phone call, the bot asks for:
 - passenger name
 - passenger age
 
-After the caller confirms, the server generates a payment link and sends it by SMS when Twilio SMS credentials are configured. The link is valid only until 15 minutes before the train departure time. If fewer than 15 minutes remain, the bot refuses that payment and asks the user to start a new booking for another train.
+After the caller confirms, the server generates a payment link and sends it by SMS when Exotel or Twilio SMS credentials are configured. The link is valid only until 15 minutes before the train departure time. If fewer than 15 minutes remain, the bot refuses that payment and asks the user to start a new booking for another train.
 
 ## Test without a toll-free number
 
