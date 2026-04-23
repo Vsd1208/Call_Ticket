@@ -521,6 +521,151 @@ async function createPaymentLink(session) {
   return { ...payment, url: `${PUBLIC_BASE_URL}/pay/${reference}` };
 }
 
+// ─── LLM (GOOGLE GEMINI) ────────────────────────────────────────────────────
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_MODEL = "gemini-2.0-flash";
+
+function geminiReady() { return Boolean(GEMINI_API_KEY); }
+
+// Per-browser-session conversation histories  (sessionId → messages[])
+const chatHistories = new Map();
+
+const SYSTEM_PROMPT = `You are a friendly Indian railway ticket booking voice assistant. You help callers book train tickets over the phone or chat.
+
+Your job is to collect these booking details one by one through natural conversation:
+1. Journey type: "Reserved" or "Unreserved" (local/general = Unreserved; sleeper/AC/chair car = Reserved)
+2. Source station (from): one of Delhi, Mumbai, Chennai, Bengaluru, Kolkata, Hyderabad, Pune, Ahmedabad, Jaipur, Lucknow
+3. Destination station (to): one of the same list above
+4. Travel date: in YYYY-MM-DD format (interpret "today", "tomorrow", "kal", "aaj" etc. relative to the current date which is {{TODAY}})
+5. Departure time: in HH:MM 24-hour format (interpret "9:30 AM" as "09:30", "2 PM" as "14:00")
+6. Passenger name
+7. Passenger age
+
+Rules:
+- Be conversational, warm, and concise. Keep responses to 1-2 sentences.
+- If the user gives multiple details at once, extract all of them.
+- If a detail is missing, ask for the NEXT missing one naturally.
+- Understand both English and Hindi (transliterated). For example "Delhi se Mumbai kal" means "from Delhi to Mumbai tomorrow".
+- When ALL details are collected, summarize the booking and ask the user to say "confirm" to proceed or "cancel" to start over.
+- If the user says confirm/yes/haan/proceed and all details are filled, set "confirmed" to true.
+- If the user says cancel/reset/start over/dobara, set "reset" to true.
+- You MUST respond with valid JSON only. No markdown, no code fences. Just raw JSON.
+
+Respond ONLY with a JSON object in this exact format (no extra text, no markdown):
+{
+  "reply": "Your conversational response to the user",
+  "slots": {
+    "journeyType": "",
+    "from": "",
+    "to": "",
+    "date": "",
+    "departureTime": "",
+    "name": "",
+    "age": ""
+  },
+  "confirmed": false,
+  "reset": false
+}
+
+The "slots" object should contain ALL slot values collected so far across the entire conversation (not just from the latest message). Leave a slot as "" if not yet known. Use the canonical station names (Delhi, Mumbai, Chennai, Bengaluru, Kolkata, Hyderabad, Pune, Ahmedabad, Jaipur, Lucknow). Use "Reserved" or "Unreserved" for journeyType.`;
+
+function buildSystemPrompt() {
+  const today = new Date();
+  const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  return SYSTEM_PROMPT.replace("{{TODAY}}", dateStr);
+}
+
+async function callGemini(sessionId, userMessage) {
+  // Manage conversation history
+  if (!chatHistories.has(sessionId)) {
+    chatHistories.set(sessionId, []);
+  }
+  const history = chatHistories.get(sessionId);
+  history.push({ role: "user", parts: [{ text: userMessage }] });
+
+  // Keep history manageable (last 20 turns)
+  if (history.length > 40) history.splice(0, history.length - 40);
+
+  const body = JSON.stringify({
+    system_instruction: { parts: [{ text: buildSystemPrompt() }] },
+    contents: history,
+    generationConfig: {
+      temperature: 0.3,
+      maxOutputTokens: 512
+    }
+  });
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const req = https.request({
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body)
+      }
+    }, (res) => {
+      let data = "";
+      res.on("data", chunk => { data += chunk; });
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.error) {
+            reject(new Error(json.error.message || JSON.stringify(json.error)));
+            return;
+          }
+          const text = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          // Add assistant response to history
+          history.push({ role: "model", parts: [{ text }] });
+          resolve(text);
+        } catch (e) {
+          reject(new Error(`Gemini parse error: ${e.message} — raw: ${data.slice(0, 300)}`));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function parseGeminiResponse(raw) {
+  // Strip markdown code fences if present
+  let cleaned = raw.trim();
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  }
+  try {
+    const parsed = JSON.parse(cleaned);
+    return {
+      reply: parsed.reply || "",
+      slots: {
+        journeyType: parsed.slots?.journeyType || "",
+        from: parsed.slots?.from || "",
+        to: parsed.slots?.to || "",
+        date: parsed.slots?.date || "",
+        departureTime: parsed.slots?.departureTime || "",
+        name: parsed.slots?.name || "",
+        age: parsed.slots?.age || ""
+      },
+      confirmed: Boolean(parsed.confirmed),
+      reset: Boolean(parsed.reset)
+    };
+  } catch {
+    // If LLM didn't return valid JSON, return the text as reply
+    return {
+      reply: raw.trim(),
+      slots: { journeyType: "", from: "", to: "", date: "", departureTime: "", name: "", age: "" },
+      confirmed: false,
+      reset: false
+    };
+  }
+}
+
 // ─── API HANDLERS ────────────────────────────────────────────────────────────
 
 async function handleApi(req, res, url) {
