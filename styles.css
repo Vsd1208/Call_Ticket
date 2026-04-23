@@ -373,6 +373,58 @@ dd {
   margin-bottom: 8px;
 }
 
+.phone-panel {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.panel-head.compact {
+  align-items: center;
+}
+
+.provider-dot {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 0 4px rgba(176, 93, 0, 0.14);
+}
+
+.provider-dot.ready {
+  background: var(--green);
+  box-shadow: 0 0 0 4px rgba(11, 122, 83, 0.14);
+}
+
+.call-now-form {
+  margin-top: 14px;
+}
+
+.call-now-form label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.call-now-form button {
+  min-width: 86px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--rose);
+  color: #fff;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.call-message {
+  min-height: 42px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
 @media (max-width: 880px) {
   .app-shell {
     grid-template-columns: 1fr;

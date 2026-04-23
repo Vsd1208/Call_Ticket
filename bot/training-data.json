@@ -1,0 +1,116 @@
+{
+  "intents": [
+    {
+      "name": "book_ticket",
+      "examples": [
+        "book a ticket from Delhi to Mumbai tomorrow",
+        "I want to reserve a ticket",
+        "please book train ticket for me",
+        "ticket chahiye Delhi se Mumbai",
+        "mujhe ticket book karni hai",
+        "Chennai to Bengaluru ticket tomorrow",
+        "book journey from Pune to Hyderabad",
+        "reserve seat from Jaipur to Delhi",
+        "Mumbai se Kolkata ticket book karo",
+        "kal ke liye ticket chahiye"
+      ],
+      "reply": "Sure, I can book that. Please tell me the source, destination, travel date, passenger name, and age."
+    },
+    {
+      "name": "journey_type",
+      "examples": [
+        "reserved journey",
+        "unreserved journey",
+        "local train",
+        "general ticket",
+        "I want reserved ticket",
+        "book unreserved local",
+        "sleeper reservation",
+        "chair car reserved",
+        "ordinary local train",
+        "confirmed seat ticket"
+      ],
+      "reply": "Thanks. I will note whether the journey is reserved or unreserved."
+    },
+    {
+      "name": "provide_details",
+      "examples": [
+        "from Delhi to Mumbai tomorrow for Rahul age 28",
+        "Delhi se Mumbai kal Rahul umar 28",
+        "my name is Anika age 24",
+        "passenger name is Sita age 31",
+        "I will travel from Chennai to Bengaluru today",
+        "window seat for Raj age 35",
+        "from Kolkata to Pune on 2026-05-12",
+        "Hyderabad to Jaipur for Neha age 22",
+        "Bengaluru se Chennai aaj",
+        "lower seat please"
+      ],
+      "reply": "Thanks. I am filling those details now."
+    },
+    {
+      "name": "payment",
+      "examples": [
+        "send payment link",
+        "payment sms bhejo",
+        "pay by sms",
+        "send link to phone",
+        "I will pay later",
+        "payment before departure",
+        "send me payment message",
+        "sms payment link",
+        "mobile payment link",
+        "pay ticket amount"
+      ],
+      "reply": "I will send the payment link by SMS after confirmation."
+    },
+    {
+      "name": "confirm_booking",
+      "examples": [
+        "confirm",
+        "yes book it",
+        "go ahead",
+        "ticket confirm karo",
+        "haan book karo",
+        "yes please book",
+        "ok confirm ticket",
+        "book now",
+        "proceed",
+        "final karo"
+      ],
+      "reply": "I will confirm the booking now."
+    },
+    {
+      "name": "reset_booking",
+      "examples": [
+        "start over",
+        "reset",
+        "cancel this booking",
+        "clear details",
+        "dobara shuru karo",
+        "booking cancel karo",
+        "change everything",
+        "new ticket",
+        "restart call",
+        "galat details"
+      ],
+      "reply": "No problem. I have cleared the booking details."
+    },
+    {
+      "name": "greeting",
+      "examples": [
+        "hello",
+        "hi",
+        "namaste",
+        "good morning",
+        "good evening",
+        "are you there",
+        "can you hear me",
+        "suno",
+        "hello bot",
+        "namaskar"
+      ],
+      "reply": "Hello. I can help you book a ticket by call."
+    }
+  ]
+}

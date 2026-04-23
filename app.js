@@ -17,20 +17,24 @@ const translations = {
     missingFrom: "Which station are you starting from?",
     missingTo: "Which station are you going to?",
     missingDate: "What is your travel date?",
+    missingDepartureTime: "What is the train departure time?",
+    missingJourneyType: "Is the journey reserved or unreserved, for example a local train?",
     missingName: "What is the passenger name?",
     missingAge: "What is the passenger age?",
-    ready: "I have all the details. Please confirm to book the ticket.",
-    booked: "Your ticket is booked."
+    ready: "I have all the details. Please confirm to send the payment link.",
+    booked: "Your payment link is ready."
   },
   "hi-IN": {
     greeting: "Namaste. Kripya apni yatra bataiye, jaise Delhi se Mumbai kal Rahul age 28 ke liye ticket book karo.",
     missingFrom: "Aap kis station se yatra shuru karenge?",
     missingTo: "Aap kis station tak jana chahte hain?",
     missingDate: "Yatra ki tareekh kya hai?",
+    missingDepartureTime: "Train ka departure time kya hai?",
+    missingJourneyType: "Yatra reserved hai ya unreserved, jaise local train?",
     missingName: "Yatri ka naam kya hai?",
     missingAge: "Yatri ki umar kya hai?",
-    ready: "Mere paas sabhi details hain. Ticket book karne ke liye confirm kijiye.",
-    booked: "Aapka ticket book ho gaya hai."
+    ready: "Mere paas sabhi details hain. Payment link bhejne ke liye confirm kijiye.",
+    booked: "Aapka payment link taiyar hai."
   }
 };
 
@@ -48,20 +52,30 @@ const els = {
   from: document.querySelector("#fromStation"),
   to: document.querySelector("#toStation"),
   date: document.querySelector("#travelDate"),
+  departureTime: document.querySelector("#departureTime"),
+  journeyType: document.querySelector("#journeyType"),
   name: document.querySelector("#passengerName"),
   age: document.querySelector("#passengerAge"),
   seat: document.querySelector("#seatPref"),
+  paymentDeadline: document.querySelector("#paymentDeadline"),
   book: document.querySelector("#bookTicket"),
   ticketCard: document.querySelector("#ticketCard"),
   ticketRoute: document.querySelector("#ticketRoute"),
   ticketId: document.querySelector("#ticketId"),
-  ticketMeta: document.querySelector("#ticketMeta")
+  ticketMeta: document.querySelector("#ticketMeta"),
+  paymentLink: document.querySelector("#paymentLink"),
+  callNowForm: document.querySelector("#callNowForm"),
+  phoneNumber: document.querySelector("#phoneNumber"),
+  callMessage: document.querySelector("#callMessage"),
+  providerDot: document.querySelector("#providerDot")
 };
 
 const state = {
   from: "",
   to: "",
   date: "",
+  departureTime: "",
+  journeyType: "",
   name: "",
   age: "",
   seat: "Any",
@@ -70,6 +84,8 @@ const state = {
 };
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+const botModel = window.CALL_TICKET_BOT_MODEL;
+const intentStopWords = new Set(["a", "an", "the", "is", "to", "for", "me", "my", "i", "it", "this", "please", "ke", "ki", "ka", "hai", "se", "ko"]);
 
 function initRecognition() {
   if (!SpeechRecognition) {
@@ -130,6 +146,45 @@ function say(text, shouldSpeak = true) {
 
 function normalize(text) {
   return text.toLowerCase().replace(/[.,]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function tokenizeForIntent(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s-]/gu, " ")
+    .split(/\s+/)
+    .filter((token) => token && !intentStopWords.has(token));
+}
+
+function classifyIntent(text) {
+  if (!botModel) return { name: "provide_details", confidence: 0, reply: "" };
+
+  const tokens = tokenizeForIntent(text);
+  const vocabularySize = botModel.vocabulary.length || 1;
+  let best = { name: "provide_details", confidence: 0, reply: "" };
+  let secondScore = Number.NEGATIVE_INFINITY;
+
+  for (const [name, label] of Object.entries(botModel.labels)) {
+    let score = Math.log(label.docs / botModel.totalDocs);
+    for (const token of tokens) {
+      const count = label.tokenCounts[token] || 0;
+      score += Math.log((count + 1) / (label.totalTokens + vocabularySize));
+    }
+
+    if (score > best.score || best.score === undefined) {
+      secondScore = best.score ?? Number.NEGATIVE_INFINITY;
+      best = { name, score, reply: label.reply };
+    } else if (score > secondScore) {
+      secondScore = score;
+    }
+  }
+
+  const margin = best.score - secondScore;
+  return {
+    name: best.name,
+    confidence: Math.min(0.99, Math.max(0.1, margin / 8)),
+    reply: best.reply
+  };
 }
 
 function stationPattern() {
@@ -216,6 +271,58 @@ function parseSeat(text) {
   return "";
 }
 
+function parseJourneyType(text) {
+  if (/\b(unreserved|general|local|suburban|ordinary)\b|लोकल|जनरल/i.test(text)) return "Unreserved";
+  if (/\b(reserved|reservation|sleeper|chair car|ac|confirmed seat)\b|आरक्षित/i.test(text)) return "Reserved";
+  return "";
+}
+
+function parseDepartureTime(text) {
+  const source = text.toLowerCase();
+  let match = source.match(/\b(?:at|time|departure|departing|leaves|train time)\s*(?:is)?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
+  if (!match) match = source.match(/\b(\d{1,2}):(\d{2})\s*(am|pm)?\b/i);
+  if (!match) return "";
+
+  let hour = Number(match[1]);
+  const minute = Number(match[2] || "0");
+  const meridiem = match[3];
+
+  if (minute > 59 || hour > 24) return "";
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+  if (!meridiem && hour === 24 && minute > 0) return "";
+
+  return `${String(hour % 24).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
+}
+
+function departureDateTime() {
+  if (!state.date || !state.departureTime) return null;
+  const value = new Date(`${state.date}T${state.departureTime}:00`);
+  return Number.isNaN(value.getTime()) ? null : value;
+}
+
+function paymentDeadline() {
+  const departure = departureDateTime();
+  if (!departure) return "";
+  const deadline = new Date(departure);
+  deadline.setMinutes(deadline.getMinutes() - 15);
+  return `${formatDate(deadline)} ${String(deadline.getHours()).padStart(2, "0")}:${String(deadline.getMinutes()).padStart(2, "0")}`;
+}
+
+function canStillPay() {
+  const departure = departureDateTime();
+  if (!departure) return false;
+  const deadline = new Date(departure);
+  deadline.setMinutes(deadline.getMinutes() - 15);
+  return new Date() <= deadline;
+}
+
+function estimateFare() {
+  const base = state.journeyType === "Unreserved" ? 25 : 180;
+  const routeFactor = state.from && state.to ? Math.abs(state.from.length - state.to.length) * 7 : 0;
+  return base + routeFactor;
+}
+
 function detectLocale(text) {
   if (els.language.value !== "auto") return els.language.value;
   if (/[ऀ-ॿ]/.test(text) || /\b(namaste|kripya|yatra|umar|naam|karo|kal)\b/i.test(text)) return "hi-IN";
@@ -241,20 +348,27 @@ function updateFromText(rawText) {
   const name = parseName(rawText) || (!state.name && state.from && state.to && state.date ? parseDirectName(rawText) : "");
   const age = parseAge(rawText);
   const seat = parseSeat(rawText);
+  const journeyType = parseJourneyType(rawText);
+  const departureTime = parseDepartureTime(rawText);
 
   if (date) state.date = date;
   if (name) state.name = name;
   if (age) state.age = age;
   if (seat) state.seat = seat;
+  if (journeyType) state.journeyType = journeyType;
+  if (departureTime) state.departureTime = departureTime;
 }
 
 function nextPrompt() {
   const messages = activeMessages();
+  if (!state.journeyType) return messages.missingJourneyType;
   if (!state.from) return messages.missingFrom;
   if (!state.to) return messages.missingTo;
   if (!state.date) return messages.missingDate;
+  if (!state.departureTime) return messages.missingDepartureTime;
   if (!state.name) return messages.missingName;
   if (!state.age) return messages.missingAge;
+  if (!canStillPay()) return "Payment is already closed for this train because less than 15 minutes remain before departure. Please choose another train.";
   return messages.ready;
 }
 
@@ -262,16 +376,37 @@ function refreshDetails() {
   els.from.textContent = state.from || "Waiting";
   els.to.textContent = state.to || "Waiting";
   els.date.textContent = state.date || "Waiting";
+  els.departureTime.textContent = state.departureTime || "Waiting";
+  els.journeyType.textContent = state.journeyType || "Waiting";
   els.name.textContent = state.name || "Waiting";
   els.age.textContent = state.age || "Waiting";
   els.seat.textContent = state.seat || "Any";
-  els.book.disabled = !(state.from && state.to && state.date && state.name && state.age);
+  els.paymentDeadline.textContent = paymentDeadline() || "Waiting";
+  els.book.disabled = !(state.journeyType && state.from && state.to && state.date && state.departureTime && state.name && state.age && canStillPay());
 }
 
 function receiveCallerText(text) {
   addMessage(text, "user");
+  const intent = classifyIntent(text);
+
+  if (intent.name === "reset_booking" && intent.confidence > 0.25) {
+    resetState();
+    return;
+  }
+
   updateFromText(text);
   refreshDetails();
+
+  if (intent.name === "confirm_booking" && intent.confidence > 0.25 && !els.book.disabled) {
+    bookTicket();
+    return;
+  }
+
+  if (intent.name === "greeting" && intent.confidence > 0.25) {
+    say(`${intent.reply} ${nextPrompt()}`);
+    return;
+  }
+
   say(nextPrompt());
 }
 
@@ -279,6 +414,8 @@ function resetState() {
   state.from = "";
   state.to = "";
   state.date = "";
+  state.departureTime = "";
+  state.journeyType = "";
   state.name = "";
   state.age = "";
   state.seat = "Any";
@@ -288,13 +425,81 @@ function resetState() {
   say(activeMessages().greeting, false);
 }
 
-function bookTicket() {
-  const id = `CTB-${Math.floor(100000 + Math.random() * 900000)}`;
+async function bookTicket() {
+  let payment = {
+    reference: `CTB-${Math.floor(100000 + Math.random() * 900000)}`,
+    amount: estimateFare(),
+    deadline: paymentDeadline(),
+    url: "#"
+  };
+
+  try {
+    const response = await fetch("/api/payment/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: state.from,
+        to: state.to,
+        date: state.date,
+        departureTime: state.departureTime,
+        journeyType: state.journeyType,
+        name: state.name,
+        age: state.age
+      })
+    });
+    const result = await response.json();
+    if (response.ok && result.ok) payment = result.payment;
+  } catch (error) {
+    payment.url = "#";
+  }
+
   els.ticketRoute.textContent = `${state.from} to ${state.to}`;
-  els.ticketId.textContent = id;
-  els.ticketMeta.textContent = `${state.name}, age ${state.age} | ${state.date} | Seat: ${state.seat}`;
+  els.ticketId.textContent = payment.reference;
+  els.ticketMeta.textContent = `${state.journeyType} | ${state.name}, age ${state.age} | ${state.date} ${state.departureTime} | Seat: ${state.seat} | Rs ${payment.amount} | Pay before ${payment.deadline}`;
+  els.paymentLink.href = payment.url;
+  els.paymentLink.toggleAttribute("hidden", payment.url === "#");
   els.ticketCard.hidden = false;
-  say(`${activeMessages().booked} Reference number ${id}.`);
+  say(`${activeMessages().booked} Reference number ${payment.reference}. Pay before ${payment.deadline}.`);
+}
+
+async function loadCallProviderStatus() {
+  if (!els.callMessage) return;
+
+  try {
+    const response = await fetch("/api/call/config");
+    const config = await response.json();
+    els.providerDot.classList.toggle("ready", config.ready);
+    els.callMessage.textContent = config.ready
+      ? `Live phone provider is ready. Call ${config.callableNumber} or enter a number.`
+      : `Simulation mode. Dummy number: ${config.dummyTollFreeNumber}. Replace it with a provider number for real calls.`;
+  } catch (error) {
+    els.providerDot.classList.remove("ready");
+    els.callMessage.textContent = "Open this app through the local server to make real calls: node server.js";
+  }
+}
+
+async function startOutboundCall(phoneNumber) {
+  els.callMessage.textContent = "Starting phone call...";
+
+  try {
+    const response = await fetch("/api/call/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to: phoneNumber })
+    });
+    const result = await response.json();
+
+    if (!response.ok || !result.ok) {
+      els.callMessage.textContent = result.error || "Could not start the call.";
+      return;
+    }
+
+    els.callMessage.textContent = result.simulated
+      ? `${result.message} Simulated call id: ${result.callSid}`
+      : `Call started. Provider call id: ${result.callSid}`;
+  } catch (error) {
+    els.callMessage.textContent = "Could not reach the local call server. Run: node server.js";
+  }
 }
 
 els.start.addEventListener("click", () => {
@@ -328,4 +533,11 @@ els.form.addEventListener("submit", (event) => {
 
 els.book.addEventListener("click", bookTicket);
 
+els.callNowForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const phoneNumber = els.phoneNumber.value.trim();
+  startOutboundCall(phoneNumber);
+});
+
 refreshDetails();
+loadCallProviderStatus();

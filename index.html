@@ -86,6 +86,14 @@
             <dd id="travelDate">Waiting</dd>
           </div>
           <div>
+            <dt>Departure</dt>
+            <dd id="departureTime">Waiting</dd>
+          </div>
+          <div>
+            <dt>Journey</dt>
+            <dd id="journeyType">Waiting</dd>
+          </div>
+          <div>
             <dt>Passenger</dt>
             <dd id="passengerName">Waiting</dd>
           </div>
@@ -96,6 +104,10 @@
           <div>
             <dt>Seat</dt>
             <dd id="seatPref">Any</dd>
+          </div>
+          <div>
+            <dt>Pay Before</dt>
+            <dd id="paymentDeadline">Waiting</dd>
           </div>
         </dl>
 
@@ -108,6 +120,25 @@
           </div>
           <p class="ticket-id" id="ticketId">CTB-000000</p>
           <p class="ticket-meta" id="ticketMeta"></p>
+          <a class="payment-link" id="paymentLink" href="#" target="_blank" rel="noreferrer">Open payment link</a>
+        </section>
+
+        <section class="phone-panel">
+          <div class="panel-head compact">
+            <div>
+              <p class="eyebrow">Real phone call</p>
+              <h2>Call Now</h2>
+            </div>
+            <span class="provider-dot" id="providerDot" title="Phone provider status" aria-label="Phone provider status"></span>
+          </div>
+          <form id="callNowForm" class="call-now-form">
+            <label for="phoneNumber">Phone number</label>
+            <div class="input-row">
+              <input id="phoneNumber" type="tel" placeholder="+919876543210" autocomplete="tel">
+              <button type="submit">Call</button>
+            </div>
+          </form>
+          <p class="call-message" id="callMessage">Start the local server to enable phone calling.</p>
         </section>
 
         <section class="implementation-note">
@@ -120,6 +151,7 @@
       </aside>
     </main>
 
+    <script src="bot-model.js"></script>
     <script src="app.js"></script>
   </body>
 </html>
