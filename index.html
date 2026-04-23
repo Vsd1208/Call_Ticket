@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Call Ticket Booking</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="call-panel" aria-label="Voice ticket booking">
+        <div class="brand-row">
+          <div>
+            <p class="eyebrow">Multilingual voice agent</p>
+            <h1>Call Ticket Booking</h1>
+          </div>
+          <div class="status-pill" id="callStatus">Ready</div>
+        </div>
+
+        <div class="agent-zone">
+          <div class="voice-ring" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+          <div>
+            <p class="agent-label">Bot says</p>
+            <p class="agent-speech" id="botSpeech">
+              Hello. Tell me your journey details, for example: book a ticket from Delhi to Mumbai tomorrow for Rahul, age 28.
+            </p>
+          </div>
+        </div>
+
+        <div class="toolbar" aria-label="Call controls">
+          <button class="icon-button primary" id="startCall" type="button" title="Start listening" aria-label="Start listening">
+            <span aria-hidden="true">mic</span>
+          </button>
+          <button class="icon-button" id="stopCall" type="button" title="Stop listening" aria-label="Stop listening">
+            <span aria-hidden="true">stop</span>
+          </button>
+          <button class="icon-button" id="resetFlow" type="button" title="Reset booking" aria-label="Reset booking">
+            <span aria-hidden="true">reset</span>
+          </button>
+          <label class="select-wrap" for="languageSelect">
+            <span>Language</span>
+            <select id="languageSelect">
+              <option value="auto">Auto detect</option>
+              <option value="en-IN">English</option>
+              <option value="hi-IN">Hindi</option>
+              <option value="ta-IN">Tamil</option>
+              <option value="te-IN">Telugu</option>
+              <option value="bn-IN">Bengali</option>
+              <option value="mr-IN">Marathi</option>
+            </select>
+          </label>
+        </div>
+
+        <form class="typed-entry" id="typedForm">
+          <label for="typedInput">Type or paste what the caller said</label>
+          <div class="input-row">
+            <input id="typedInput" type="text" autocomplete="off" placeholder="Book from Chennai to Bengaluru tomorrow for Anika age 24">
+            <button type="submit">Send</button>
+          </div>
+        </form>
+
+        <div class="conversation" id="conversation" aria-live="polite"></div>
+      </section>
+
+      <aside class="booking-panel" aria-label="Ticket details">
+        <div class="panel-head">
+          <p class="eyebrow">Live ticket draft</p>
+          <h2>Booking Details</h2>
+        </div>
+
+        <dl class="detail-grid">
+          <div>
+            <dt>From</dt>
+            <dd id="fromStation">Waiting</dd>
+          </div>
+          <div>
+            <dt>To</dt>
+            <dd id="toStation">Waiting</dd>
+          </div>
+          <div>
+            <dt>Date</dt>
+            <dd id="travelDate">Waiting</dd>
+          </div>
+          <div>
+            <dt>Passenger</dt>
+            <dd id="passengerName">Waiting</dd>
+          </div>
+          <div>
+            <dt>Age</dt>
+            <dd id="passengerAge">Waiting</dd>
+          </div>
+          <div>
+            <dt>Seat</dt>
+            <dd id="seatPref">Any</dd>
+          </div>
+        </dl>
+
+        <button class="book-button" id="bookTicket" type="button" disabled>Book Ticket</button>
+
+        <section class="ticket-card" id="ticketCard" hidden>
+          <div>
+            <p class="ticket-label">Confirmed ticket</p>
+            <h3 id="ticketRoute">Delhi to Mumbai</h3>
+          </div>
+          <p class="ticket-id" id="ticketId">CTB-000000</p>
+          <p class="ticket-meta" id="ticketMeta"></p>
+        </section>
+
+        <section class="implementation-note">
+          <h2>Production Path</h2>
+          <p>
+            Connect this flow to a phone number using a telephony service, stream audio to speech-to-text,
+            run the parser or an AI slot-filler, verify payment, then call your railway or bus booking API.
+          </p>
+        </section>
+      </aside>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
