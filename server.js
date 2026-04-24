@@ -273,25 +273,47 @@ function twimlSay(message, lang = "en-IN") {
 </Response>`;
 }
 
-// Exotel ExoML (similar to TwiML but uses PlayText)
+// Exotel ExoML — uses Record applet for speech capture
 function exoml(message) {
+  const action = `${PUBLIC_BASE_URL}/voice/process`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>
+  <Say voice="female" language="en">
     <![CDATA[${message}]]>
   </Say>
-  <GetDigits action="/voice/process" method="POST" timeout="10" finishOnKey="#">
-    <Say><![CDATA[${message}]]></Say>
-  </GetDigits>
+  <Record action="${action}" method="POST"
+    timeout="5"
+    transcribe="true"
+    transcribeCallback="${action}"
+    playBeep="false"
+    maxLength="15"
+    finishOnKey="#"
+  />
 </Response>`;
 }
 
 function exomlSay(message) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say><![CDATA[${message}]]></Say>
+  <Say voice="female" language="en"><![CDATA[${message}]]></Say>
   <Hangup/>
 </Response>`;
+}
+
+// Exotel sends speech via Record+transcribe or SpeechResult;
+// extract whatever field has the caller's words
+function extractSpeech(body) {
+  // TranscriptionText comes from transcribeCallback
+  // SpeechResult comes from Twilio-style gather
+  // RecordingUrl is the audio URL (we can't STT it ourselves here)
+  return String(
+    body.TranscriptionText ||
+    body.SpeechResult ||
+    body.speech ||
+    body.Digits ||
+    body.digits ||
+    ""
+  ).trim();
 }
 
 function readBody(req) {
@@ -897,55 +919,167 @@ async function handleApi(req, res, url) {
   sendJson(res, 404, { ok: false, error: "API route not found." });
 }
 
-// ─── VOICE HANDLERS (Twilio TwiML + Exotel ExoML) ───────────────────────────
+// ─── VOICE HANDLERS (Twilio TwiML + Exotel ExoML + Gemini AI) ───────────────
+
+// Per-call Gemini conversation histories (callSid → messages[])
+const callHistories = new Map();
+
+async function callGeminiVoice(callSid, userSpeech, currentSession) {
+  if (!callHistories.has(callSid)) callHistories.set(callSid, []);
+  const history = callHistories.get(callSid);
+  history.push({ role: "user", parts: [{ text: userSpeech }] });
+  if (history.length > 30) history.splice(0, history.length - 30);
+
+  const body = JSON.stringify({
+    system_instruction: { parts: [{ text: buildSystemPrompt() }] },
+    contents: history,
+    generationConfig: { temperature: 0.3, maxOutputTokens: 256 }
+  });
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(url);
+    const req = https.request({
+      hostname: parsed.hostname,
+      path: parsed.pathname + parsed.search,
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
+    }, (r) => {
+      let data = "";
+      r.on("data", chunk => { data += chunk; });
+      r.on("end", () => {
+        try {
+          const json = JSON.parse(data);
+          if (json.error) { reject(new Error(json.error.message)); return; }
+          const text = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          history.push({ role: "model", parts: [{ text }] });
+          resolve(parseGeminiResponse(text));
+        } catch (e) { reject(e); }
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 async function handleVoice(req, res, url) {
-  // Determine which XML format to use
-  const isExotel = url.searchParams.get("provider") === "exotel" ||
-    (req.headers["user-agent"] || "").toLowerCase().includes("exotel");
+  // Always use ExoML for Exotel; detect by user-agent or query param
+  const isExotel = true; // We are using Exotel exclusively
 
-  const renderGather = (message) => isExotel ? exoml(message) : twimlGather(message);
-  const renderSay = (message) => isExotel ? exomlSay(message) : twimlSay(message);
+  const renderGather = (message) => exoml(message);
+  const renderSay    = (message) => exomlSay(message);
 
-  // GET or POST /voice/incoming — start of a call
+  // ── GET or POST /voice/incoming — call starts ─────────────────────────────
   if (url.pathname === "/voice/incoming") {
     const body = req.method === "POST" ? querystring.parse(await readBody(req)) : {};
-    const callSid = body.CallSid || body.callsid || `call-${Date.now()}`;
+    const callSid = body.CallSid || body.callsid || body.CallId || `call-${Date.now()}`;
     const session = getSession(callSid);
     session.phone = callerPhoneFromWebhook(body);
+    // Reset any old Gemini history for this call
+    callHistories.delete(callSid);
     console.log(`[Call incoming] callSid=${callSid} from=${session.phone}`);
-    const greeting = "Hello! Welcome to the ticket booking service. You do not need internet for this. First, please tell me: is your journey reserved or unreserved? For example, a sleeper or air conditioned train is reserved, and a general or local train is unreserved.";
+    const greeting = "Hello! Welcome to the ticket booking service. You can speak naturally. Please tell me: is your journey reserved, like a sleeper or AC train, or unreserved, like a local or general train?";
     send(res, 200, "text/xml; charset=utf-8", renderGather(greeting));
     return;
   }
 
-  // POST /voice/process — caller spoke
+  // ── POST /voice/process — caller spoke or transcription arrived ───────────
   if (url.pathname === "/voice/process") {
     const body = querystring.parse(await readBody(req));
-    // Exotel uses 'digits' for DTMF and may send speech in different fields
-    const speech = String(
-      body.SpeechResult || body.speech || body.digits || body.Digits || ""
-    ).trim();
-    const callSid = body.CallSid || body.callsid || "local-call";
+    const speech = extractSpeech(body);
+    const callSid = body.CallSid || body.callsid || body.CallId || "local-call";
     const session = getSession(callSid);
     session.phone = callerPhoneFromWebhook(body) || session.phone;
 
     console.log(`[Call process] callSid=${callSid} speech="${speech}"`);
 
-    // Reset command
+    // Empty speech — re-prompt
+    if (!speech) {
+      send(res, 200, "text/xml; charset=utf-8",
+        renderGather(isComplete(session) ? nextPrompt(session) : "Sorry, I did not catch that. " + nextPrompt(session)));
+      return;
+    }
+
+    // ── Try Gemini AI first ────────────────────────────────────────────────
+    if (geminiReady()) {
+      try {
+        const parsed = await callGeminiVoice(callSid, speech, session);
+
+        // Merge Gemini slots into session
+        const s = parsed.slots;
+        if (s.journeyType) session.journeyType = s.journeyType;
+        if (s.from)        session.from        = s.from;
+        if (s.to)          session.to          = s.to;
+        if (s.date)        session.date        = s.date;
+        if (s.departureTime) session.departureTime = s.departureTime;
+        if (s.name)        session.name        = s.name;
+        if (s.age)         session.age         = s.age;
+
+        // Reset
+        if (parsed.reset) {
+          sessions.delete(callSid);
+          callHistories.delete(callSid);
+          send(res, 200, "text/xml; charset=utf-8",
+            renderGather("No problem. I have cleared your booking. Please tell me your new journey."));
+          return;
+        }
+
+        // Confirmed + all slots filled → create payment
+        if (parsed.confirmed && isComplete(session)) {
+          if (!canStillPay(session)) {
+            sessions.delete(callSid);
+            callHistories.delete(callSid);
+            send(res, 200, "text/xml; charset=utf-8",
+              renderSay("Sorry, payment is now closed because less than 15 minutes remain before departure. Please call again for a different train. Thank you."));
+            return;
+          }
+          const payment = await createPaymentLink(session);
+          const smsText = `Pay Rs ${payment.amount} for ticket ${payment.reference}: ${payment.url}. Pay before ${payment.deadline}.`;
+          let smsSent = false, simulated = false;
+          if (session.phone) {
+            try {
+              const sms = await sendPaymentSms(session.phone, smsText, payment.reference);
+              smsSent = true; simulated = sms.simulated;
+            } catch (err) { console.error("SMS error:", err.message); }
+          }
+          sessions.delete(callSid);
+          callHistories.delete(callSid);
+          const smsMsg = smsSent && !simulated
+            ? "I have sent the payment link to your phone by SMS."
+            : "Your payment link is ready. Please check your SMS."
+          send(res, 200, "text/xml; charset=utf-8",
+            renderSay(`${smsMsg} Your reference number is ${payment.reference}. Please pay before ${payment.deadline}. Thank you for calling.`));
+          return;
+        }
+
+        // Otherwise speak Gemini's reply
+        const replyText = parsed.reply || nextPrompt(session);
+        send(res, 200, "text/xml; charset=utf-8", renderGather(replyText));
+        return;
+
+      } catch (err) {
+        console.error("[Gemini voice error]", err.message);
+        // Fall through to deterministic bot
+      }
+    }
+
+    // ── Deterministic fallback ────────────────────────────────────────────
     if (/\b(reset|cancel|start over|new ticket|dobara|shuru)\b/i.test(speech)) {
       sessions.delete(callSid);
-      send(res, 200, "text/xml; charset=utf-8", renderGather("No problem, I have cleared the details. Please tell me your new journey."));
+      send(res, 200, "text/xml; charset=utf-8",
+        renderGather("No problem. I have cleared the details. Please tell me your new journey."));
       return;
     }
 
     updateBooking(session, speech);
 
-    // Confirm command
     if (/\b(confirm|yes|book it|go ahead|proceed|haan|theek|ok)\b/i.test(speech) && isComplete(session)) {
       if (!canStillPay(session)) {
         sessions.delete(callSid);
-        send(res, 200, "text/xml; charset=utf-8", renderSay("Sorry, payment is closed because less than 15 minutes remain before departure. Please call again to book a different train. Thank you."));
+        send(res, 200, "text/xml; charset=utf-8",
+          renderSay("Sorry, payment is closed. Please call again for a different train. Thank you."));
         return;
       }
       const payment = await createPaymentLink(session);
@@ -955,17 +1089,14 @@ async function handleVoice(req, res, url) {
         try {
           const sms = await sendPaymentSms(session.phone, smsText, payment.reference);
           smsSent = true; simulated = sms.simulated;
-        } catch (err) {
-          console.error("SMS error:", err.message);
-        }
+        } catch (err) { console.error("SMS error:", err.message); }
       }
       sessions.delete(callSid);
-      const smsStatus = smsSent && simulated
-        ? "A simulated payment link has been stored on the server."
-        : smsSent
-          ? "The payment link has been sent to your phone by SMS."
-          : "Your payment link is ready but SMS could not be sent. Please contact us.";
-      send(res, 200, "text/xml; charset=utf-8", renderSay(`${smsStatus} Your reference number is ${payment.reference}. Please pay before ${payment.deadline}. Your ticket will be confirmed after payment. Thank you for calling.`));
+      const smsStatus = smsSent && !simulated
+        ? "The payment link has been sent to your phone by SMS."
+        : "A payment link has been created. Reference: " + payment.reference;
+      send(res, 200, "text/xml; charset=utf-8",
+        renderSay(`${smsStatus} Please pay before ${payment.deadline}. Thank you for calling.`));
       return;
     }
 
