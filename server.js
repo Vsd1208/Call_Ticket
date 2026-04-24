@@ -303,13 +303,12 @@ function exomlSay(message) {
 // Exotel sends speech via Record+transcribe or SpeechResult;
 // extract whatever field has the caller's words
 function extractSpeech(body) {
-  // TranscriptionText comes from transcribeCallback
-  // SpeechResult comes from Twilio-style gather
-  // RecordingUrl is the audio URL (we can't STT it ourselves here)
   return String(
     body.TranscriptionText ||
     body.SpeechResult ||
     body.speech ||
+    body.text ||
+    body.transcript ||
     body.Digits ||
     body.digits ||
     ""
@@ -991,14 +990,18 @@ async function handleVoice(req, res, url) {
     const speech = extractSpeech(body);
     const callSid = body.CallSid || body.callsid || body.CallId || "local-call";
     const session = getSession(callSid);
+    console.log("----- VOICE DEBUG -----");
+    console.log("Speech:", speech);
+    console.log("Session BEFORE:", session);
+    
     session.phone = callerPhoneFromWebhook(body) || session.phone;
 
     console.log(`[Call process] callSid=${callSid} speech="${speech}"`);
 
     // Empty speech — re-prompt
     if (!speech) {
-      send(res, 200, "text/xml; charset=utf-8",
-        renderGather(isComplete(session) ? nextPrompt(session) : "Sorry, I did not catch that. " + nextPrompt(session)));
+      const prompt = nextPrompt(session) || "Please tell me your journey details.";
+send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
       return;
     }
 
@@ -1016,6 +1019,8 @@ async function handleVoice(req, res, url) {
         if (s.departureTime) session.departureTime = s.departureTime;
         if (s.name)        session.name        = s.name;
         if (s.age)         session.age         = s.age;
+
+        updateBooking(session, speech);
 
         // Reset
         if (parsed.reset) {
@@ -1075,7 +1080,12 @@ async function handleVoice(req, res, url) {
 
     updateBooking(session, speech);
 
-    if (/\b(confirm|yes|book it|go ahead|proceed|haan|theek|ok)\b/i.test(speech) && isComplete(session)) {
+    if (/\b(confirm|yes|book|proceed|done|go ahead|haan|theek|ok)\b/i.test(speech)) {
+  if (!isComplete(session)) {
+    send(res, 200, "text/xml; charset=utf-8",
+      renderGather("Please provide all details before confirming."));
+    return;
+  }
       if (!canStillPay(session)) {
         sessions.delete(callSid);
         send(res, 200, "text/xml; charset=utf-8",
