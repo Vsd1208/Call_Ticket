@@ -783,6 +783,117 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  // GET /api/chat/status
+  if (url.pathname === "/api/chat/status" && req.method === "GET") {
+    sendJson(res, 200, { ok: true, llmAvailable: geminiReady(), model: geminiReady() ? GEMINI_MODEL : "local-bot" });
+    return;
+  }
+
+  // POST /api/chat
+  if (url.pathname === "/api/chat" && req.method === "POST") {
+    const body = JSON.parse((await readBody(req)) || "{}");
+    const userMessage = String(body.message || "").trim();
+    const sessionId = String(body.sessionId || `web-${Date.now()}`);
+
+    if (!userMessage) {
+      sendJson(res, 400, { ok: false, error: "No message provided." });
+      return;
+    }
+
+    // ── LLM path ──
+    if (geminiReady()) {
+      try {
+        const rawResponse = await callGemini(sessionId, userMessage);
+        const parsed = parseGeminiResponse(rawResponse);
+
+        const result = {
+          ok: true,
+          llm: true,
+          reply: parsed.reply,
+          slots: parsed.slots,
+          confirmed: parsed.confirmed,
+          reset: parsed.reset,
+          payment: null
+        };
+
+        // If LLM says reset, clear chat history
+        if (parsed.reset) {
+          chatHistories.delete(sessionId);
+        }
+
+        // If LLM says confirmed and all slots are filled, create payment link
+        if (parsed.confirmed) {
+          const s = parsed.slots;
+          const session = {
+            from: s.from, to: s.to, date: s.date,
+            departureTime: s.departureTime, journeyType: s.journeyType,
+            name: s.name, age: s.age
+          };
+          if (isComplete(session)) {
+            if (canStillPay(session)) {
+              const payment = await createPaymentLink(session);
+              result.payment = payment;
+            } else {
+              result.reply += " However, payment is closed because less than 15 minutes remain before departure. Please choose another train.";
+              result.confirmed = false;
+            }
+          } else {
+            result.confirmed = false;
+          }
+        }
+
+        sendJson(res, 200, result);
+      } catch (err) {
+        console.error("Gemini chat error:", err.message);
+        sendJson(res, 502, { ok: false, error: "LLM error: " + err.message, llm: true });
+      }
+      return;
+    }
+
+    // ── Fallback: deterministic bot ──
+    const session = getSession(sessionId);
+    const isReset = /\b(reset|cancel|start over|new ticket|dobara|shuru)\b/i.test(userMessage);
+    if (isReset) {
+      sessions.delete(sessionId);
+      const freshSession = getSession(sessionId);
+      sendJson(res, 200, {
+        ok: true, llm: false,
+        reply: "No problem, I have cleared the details. Please tell me your new journey.",
+        slots: { journeyType: "", from: "", to: "", date: "", departureTime: "", name: "", age: "" },
+        confirmed: false, reset: true, payment: null
+      });
+      return;
+    }
+
+    updateBooking(session, userMessage);
+
+    const isConfirm = /\b(confirm|yes|book it|go ahead|proceed|haan|theek|ok)\b/i.test(userMessage) && isComplete(session);
+    let payment = null;
+    if (isConfirm) {
+      if (canStillPay(session)) {
+        payment = await createPaymentLink(session);
+      }
+    }
+
+    sendJson(res, 200, {
+      ok: true, llm: false,
+      reply: isConfirm && payment ? `Your payment link is ready. Reference number ${payment.reference}. Pay before ${payment.deadline}.` : nextPrompt(session),
+      slots: {
+        journeyType: session.journeyType || "",
+        from: session.from || "",
+        to: session.to || "",
+        date: session.date || "",
+        departureTime: session.departureTime || "",
+        name: session.name || "",
+        age: session.age || ""
+      },
+      confirmed: Boolean(isConfirm && payment),
+      reset: false,
+      payment
+    });
+    return;
+  }
+
   sendJson(res, 404, { ok: false, error: "API route not found." });
 }
 

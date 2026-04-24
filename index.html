@@ -3,7 +3,11 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Call Ticket Booking</title>
+    <meta name="description" content="Book train tickets through natural conversation with an AI-powered voice and chat assistant. Supports English and Hindi.">
+    <title>Call Ticket Booking — AI Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
@@ -14,7 +18,13 @@
             <p class="eyebrow">Multilingual voice agent</p>
             <h1>Call Ticket Booking</h1>
           </div>
-          <div class="status-pill" id="callStatus">Ready</div>
+          <div class="status-badges">
+            <div class="llm-badge" id="llmBadge" title="AI mode status">
+              <span class="llm-dot" id="llmDot"></span>
+              <span id="llmLabel">Checking AI…</span>
+            </div>
+            <div class="status-pill" id="callStatus">Ready</div>
+          </div>
         </div>
 
         <div class="agent-zone">
@@ -63,7 +73,12 @@
           </div>
         </form>
 
-        <div class="conversation" id="conversation" aria-live="polite"></div>
+        <div class="conversation" id="conversation" aria-live="polite">
+          <div class="typing-indicator" id="typingIndicator" hidden>
+            <span></span><span></span><span></span>
+            <em>Bot is thinking…</em>
+          </div>
+        </div>
       </section>
 
       <aside class="booking-panel" aria-label="Ticket details">
