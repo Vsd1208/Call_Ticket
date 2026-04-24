@@ -8,7 +8,20 @@ const crypto = require("crypto");
 loadLocalEnv();
 
 const PORT = Number(process.env.PORT || 3000);
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, "");
+const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+
+// Dynamically resolve the base URL from the incoming request's Host header.
+// This means ngrok/any tunnel works automatically even without PUBLIC_BASE_URL set.
+function getBaseUrl(req) {
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
+  const host = req && req.headers && req.headers.host;
+  if (!host) return `http://localhost:${PORT}`;
+  // Detect if this is an https host (ngrok, etc.)
+  const proto = (host.includes("ngrok") || host.includes("localhost.run") || host.includes("serveo") || !host.includes("localhost"))
+    ? "https"
+    : "http";
+  return `${proto}://${host}`;
+}
 const DUMMY_TOLL_FREE_NUMBER = process.env.DUMMY_TOLL_FREE_NUMBER || "+18005550199";
 const EXOTEL_EXOPHONE = process.env.EXOTEL_EXOPHONE || "04048218468";
 const EXOTEL_TRIAL_NUMBER = process.env.EXOTEL_TRIAL_NUMBER || "08897587467";
@@ -274,21 +287,29 @@ function twimlSay(message, lang = "en-IN") {
 }
 
 // Exotel ExoML — uses Record applet for speech capture
-function exoml(message) {
-  const action = `${PUBLIC_BASE_URL}/voice/process`;
+function exoml(message, req) {
+  const action = `${getBaseUrl(req)}/voice/process`;
+
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say voice="female" language="en">
     <![CDATA[${message}]]>
   </Say>
-  <Record action="${action}" method="POST"
-    timeout="5"
+
+  <Pause length="1"/>
+
+  <Record 
+    action="${action}" 
+    method="POST"
+    timeout="7"
     transcribe="true"
     transcribeCallback="${action}"
     playBeep="false"
     maxLength="15"
     finishOnKey="#"
   />
+
+  <Redirect method="POST">${action}</Redirect>
 </Response>`;
 }
 
@@ -333,8 +354,8 @@ function sendJson(res, status, value) {
   send(res, status, "application/json; charset=utf-8", JSON.stringify(value, null, 2));
 }
 
-function publicWsBaseUrl() {
-  const base = PUBLIC_BASE_URL;
+function publicWsBaseUrl(req) {
+  const base = getBaseUrl(req);
   if (base.startsWith("https://")) return base.replace("https://", "wss://");
   if (base.startsWith("http://")) return base.replace("http://", "ws://");
   return `ws://${base}`;
@@ -349,7 +370,7 @@ const staticTypes = {
 };
 
 function serveStatic(req, res) {
-  const requested = decodeURIComponent(new URL(req.url, PUBLIC_BASE_URL).pathname);
+  const requested = decodeURIComponent(new URL(req.url, getBaseUrl(req)).pathname);
   const safePath = path.normalize(requested === "/" ? "/index.html" : requested).replace(/^(\.\.[\\/])+/, "");
   const filePath = path.join(ROOT, safePath);
   if (!filePath.startsWith(ROOT)) { send(res, 403, "text/plain", "Forbidden"); return; }
@@ -439,11 +460,11 @@ function httpsPost(options, postData) {
   });
 }
 
-function startTwilioCall(to) {
+function startTwilioCall(to, baseUrl) {
   const accountSid = process.env.TWILIO_ACCOUNT_SID;
   const authToken = process.env.TWILIO_AUTH_TOKEN;
   const from = process.env.TWILIO_FROM_NUMBER;
-  const postData = querystring.stringify({ To: to, From: from, Url: `${PUBLIC_BASE_URL}/voice/incoming` });
+  const postData = querystring.stringify({ To: to, From: from, Url: `${baseUrl}/voice/incoming` });
   return httpsPost({
     hostname: "api.twilio.com",
     path: `/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Calls.json`,
@@ -453,7 +474,7 @@ function startTwilioCall(to) {
   }, postData);
 }
 
-function startExotelCall(to) {
+function startExotelCall(to, baseUrl) {
   const accountSid = process.env.EXOTEL_ACCOUNT_SID;
   const apiKey = process.env.EXOTEL_API_KEY;
   const apiToken = process.env.EXOTEL_API_TOKEN;
@@ -462,7 +483,7 @@ function startExotelCall(to) {
     CallerId: EXOTEL_EXOPHONE,
     Url: exotelFlowUrl(),
     CallType: "trans",
-    StatusCallback: `${PUBLIC_BASE_URL}/exotel/status`
+    StatusCallback: `${baseUrl}/exotel/status`
   });
   return httpsPost({
     hostname: exotelSubdomain(),
@@ -487,7 +508,7 @@ function sendTwilioSms(to, message) {
   }, postData);
 }
 
-function sendExotelSms(to, message) {
+function sendExotelSms(to, message, baseUrl) {
   const accountSid = process.env.EXOTEL_ACCOUNT_SID;
   const apiKey = process.env.EXOTEL_API_KEY;
   const apiToken = process.env.EXOTEL_API_TOKEN;
@@ -495,7 +516,7 @@ function sendExotelSms(to, message) {
     From: EXOTEL_EXOPHONE,
     To: to,
     Body: message,
-    StatusCallback: `${PUBLIC_BASE_URL}/exotel/sms-status`
+    StatusCallback: `${baseUrl}/exotel/sms-status`
   });
   return httpsPost({
     hostname: exotelSubdomain(),
@@ -506,10 +527,10 @@ function sendExotelSms(to, message) {
   }, postData);
 }
 
-async function sendPaymentSms(to, message, reference) {
+async function sendPaymentSms(to, message, reference, baseUrl) {
   if (exotelReady()) {
     try {
-      const sent = await sendExotelSms(to, message);
+      const sent = await sendExotelSms(to, message, baseUrl);
       const sms = sent.SMSMessage || sent.sms || sent;
       return { sent: true, simulated: false, provider: "exotel", providerId: sms.Sid || sms.sid || "" };
     } catch (err) {
@@ -528,7 +549,7 @@ async function sendPaymentSms(to, message, reference) {
   return { sent: true, simulated: true, provider: "simulation", providerId: simulated.id };
 }
 
-async function createPaymentLink(session) {
+async function createPaymentLink(session, req) {
   const reference = `CTB-${Math.floor(100000 + Math.random() * 900000)}`;
   const amount = estimateFare(session);
   const deadline = paymentDeadline(session);
@@ -539,7 +560,7 @@ async function createPaymentLink(session) {
     journeyType: session.journeyType, passenger: session.name, age: session.age
   };
   payments.set(reference, payment);
-  return { ...payment, url: `${PUBLIC_BASE_URL}/pay/${reference}` };
+  return { ...payment, url: `${getBaseUrl(req)}/pay/${reference}` };
 }
 
 // ─── LLM (GOOGLE GEMINI) ────────────────────────────────────────────────────
@@ -705,13 +726,13 @@ async function handleApi(req, res, url) {
         trialNumber: EXOTEL_TRIAL_NUMBER,
         appId: EXOTEL_APP_ID,
         flowUrl: exotelReady() ? exotelFlowUrl() : "",
-        voicebotConfigUrl: `${PUBLIC_BASE_URL}/exotel/voicebot-config`,
-        voicebotWsUrl: `${publicWsBaseUrl()}/exotel/voicebot`,
-        outboundStatusCallback: `${PUBLIC_BASE_URL}/exotel/status`,
-        passthruUrl: `${PUBLIC_BASE_URL}/exotel/passthru`
+        voicebotConfigUrl: `${getBaseUrl(req)}/exotel/voicebot-config`,
+        voicebotWsUrl: `${publicWsBaseUrl(req)}/exotel/voicebot`,
+        outboundStatusCallback: `${getBaseUrl(req)}/exotel/status`,
+        passthruUrl: `${getBaseUrl(req)}/exotel/passthru`
       },
-      publicBaseUrl: PUBLIC_BASE_URL,
-      inboundWebhook: `${PUBLIC_BASE_URL}/voice/incoming`,
+      publicBaseUrl: getBaseUrl(req),
+      inboundWebhook: `${getBaseUrl(req)}/voice/incoming`,
       supportsSmsPaymentLinks: exotelReady() || twilioReady(),
       supportsSimulatedSms: true,
       simulatorEndpoint: "/api/simulate/call",
@@ -739,12 +760,12 @@ async function handleApi(req, res, url) {
     }
     try {
       if (provider === "exotel") {
-        const result = await startExotelCall(to);
+        const result = await startExotelCall(to, getBaseUrl(req));
         const call = result.Call || result.call || result;
         sendJson(res, 200, { ok: true, provider, callSid: call.Sid || call.sid || "", status: call.Status || call.status || "requested" });
         return;
       }
-      const call = await startTwilioCall(to);
+      const call = await startTwilioCall(to, getBaseUrl(req));
       sendJson(res, 200, { ok: true, provider, callSid: call.sid, status: call.status });
     } catch (err) {
       sendJson(res, 502, { ok: false, error: err.message });
@@ -758,7 +779,7 @@ async function handleApi(req, res, url) {
     const session = { from: body.from, to: body.to, date: body.date, departureTime: body.departureTime, journeyType: body.journeyType, name: body.name, age: body.age };
     if (!isComplete(session)) { sendJson(res, 400, { ok: false, error: "Missing booking details." }); return; }
     if (!canStillPay(session)) { sendJson(res, 400, { ok: false, error: "Payment is closed — less than 15 minutes before departure." }); return; }
-    const payment = await createPaymentLink(session);
+    const payment = await createPaymentLink(session, req);
     sendJson(res, 200, { ok: true, payment });
     return;
   }
@@ -793,9 +814,9 @@ async function handleApi(req, res, url) {
       if (!canStillPay(session)) {
         transcript.push({ caller: "confirm", bot: "Payment is closed because less than 15 minutes remain before departure." });
       } else {
-        payment = await createPaymentLink(session);
+        payment = await createPaymentLink(session, req);
         const smsText = `Pay Rs ${payment.amount} for ticket ${payment.reference}: ${payment.url}. Pay before ${payment.deadline}.`;
-        const sms = await sendPaymentSms(session.phone, smsText, payment.reference);
+        const sms = await sendPaymentSms(session.phone, smsText, payment.reference, getBaseUrl(req));
         transcript.push({ caller: "confirm", bot: `Payment link sent${sms.simulated ? " to simulated SMS outbox" : " by SMS"}. Reference ${payment.reference}.`, payment, sms });
       }
     }
@@ -852,7 +873,7 @@ async function handleApi(req, res, url) {
           };
           if (isComplete(session)) {
             if (canStillPay(session)) {
-              const payment = await createPaymentLink(session);
+              const payment = await createPaymentLink(session, req);
               result.payment = payment;
             } else {
               result.reply += " However, payment is closed because less than 15 minutes remain before departure. Please choose another train.";
@@ -892,7 +913,7 @@ async function handleApi(req, res, url) {
     let payment = null;
     if (isConfirm) {
       if (canStillPay(session)) {
-        payment = await createPaymentLink(session);
+        payment = await createPaymentLink(session, req);
       }
     }
 
@@ -967,22 +988,43 @@ async function handleVoice(req, res, url) {
   // Always use ExoML for Exotel; detect by user-agent or query param
   const isExotel = true; // We are using Exotel exclusively
 
-  const renderGather = (message) => exoml(message);
+  const renderGather = (message) => exoml(message, req);
   const renderSay    = (message) => exomlSay(message);
 
   // ── GET or POST /voice/incoming — call starts ─────────────────────────────
   if (url.pathname === "/voice/incoming") {
-    const body = req.method === "POST" ? querystring.parse(await readBody(req)) : {};
-    const callSid = body.CallSid || body.callsid || body.CallId || `call-${Date.now()}`;
-    const session = getSession(callSid);
-    session.phone = callerPhoneFromWebhook(body);
-    // Reset any old Gemini history for this call
-    callHistories.delete(callSid);
-    console.log(`[Call incoming] callSid=${callSid} from=${session.phone}`);
-    const greeting = "Hello! Welcome to the ticket booking service. You can speak naturally. Please tell me: is your journey reserved, like a sleeper or AC train, or unreserved, like a local or general train?";
-    send(res, 200, "text/xml; charset=utf-8", renderGather(greeting));
-    return;
+
+  let body = {};
+  if (req.method === "POST") {
+    body = querystring.parse(await readBody(req));
   }
+
+  const callSid =
+    body.CallSid ||
+    body.callsid ||
+    body.CallId ||
+    `call-${Date.now()}`;
+
+  const session = getSession(callSid);
+
+  // 🔥 SAFE phone extraction (prevents crash)
+  try {
+    session.phone = callerPhoneFromWebhook(body) || "";
+  } catch (e) {
+    session.phone = "";
+  }
+
+  // Reset Gemini history
+  callHistories.delete(callSid);
+
+  console.log(`[Call incoming] callSid=${callSid} from=${session.phone}`);
+
+  const greeting =
+    "Hello! Welcome to the ticket booking service. You can speak naturally. Please tell me: is your journey reserved or unreserved?";
+
+  send(res, 200, "text/xml; charset=utf-8", renderGather(greeting));
+  return;
+}
 
   // ── POST /voice/process — caller spoke or transcription arrived ───────────
   if (url.pathname === "/voice/process") {
@@ -1040,12 +1082,12 @@ send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
               renderSay("Sorry, payment is now closed because less than 15 minutes remain before departure. Please call again for a different train. Thank you."));
             return;
           }
-          const payment = await createPaymentLink(session);
+          const payment = await createPaymentLink(session, req);
           const smsText = `Pay Rs ${payment.amount} for ticket ${payment.reference}: ${payment.url}. Pay before ${payment.deadline}.`;
           let smsSent = false, simulated = false;
           if (session.phone) {
             try {
-              const sms = await sendPaymentSms(session.phone, smsText, payment.reference);
+              const sms = await sendPaymentSms(session.phone, smsText, payment.reference, getBaseUrl(req));
               smsSent = true; simulated = sms.simulated;
             } catch (err) { console.error("SMS error:", err.message); }
           }
@@ -1092,12 +1134,12 @@ send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
           renderSay("Sorry, payment is closed. Please call again for a different train. Thank you."));
         return;
       }
-      const payment = await createPaymentLink(session);
+      const payment = await createPaymentLink(session, req);
       const smsText = `Pay Rs ${payment.amount} for ticket ${payment.reference}: ${payment.url}. Pay before ${payment.deadline}.`;
       let smsSent = false, simulated = false;
       if (session.phone) {
         try {
-          const sms = await sendPaymentSms(session.phone, smsText, payment.reference);
+          const sms = await sendPaymentSms(session.phone, smsText, payment.reference, getBaseUrl(req));
           smsSent = true; simulated = sms.simulated;
         } catch (err) { console.error("SMS error:", err.message); }
       }
@@ -1123,9 +1165,9 @@ async function handleExotel(req, res, url) {
   // Voicebot config — returns WS URL for the Exotel Voicebot applet
   if (url.pathname === "/exotel/voicebot-config") {
     sendJson(res, 200, {
-      ws_url: `${publicWsBaseUrl()}/exotel/voicebot`,
-      websocket_url: `${publicWsBaseUrl()}/exotel/voicebot`,
-      status_callback: `${PUBLIC_BASE_URL}/exotel/status`
+      ws_url: `${publicWsBaseUrl(req)}/exotel/voicebot`,
+      websocket_url: `${publicWsBaseUrl(req)}/exotel/voicebot`,
+      status_callback: `${getBaseUrl(req)}/exotel/status`
     });
     return;
   }
@@ -1285,12 +1327,12 @@ function handleVoicebotSocket(req, socket) {
         sessions.delete(callSid);
         return;
       }
-      const payment = await createPaymentLink(session);
+      const payment = await createPaymentLink(session, req);
       const smsText = `Pay Rs ${payment.amount} for ticket ${payment.reference}: ${payment.url}. Pay before ${payment.deadline}.`;
       let smsSent = false, simulated = false;
       if (session.phone) {
         try {
-          const sms = await sendPaymentSms(session.phone, smsText, payment.reference);
+          const sms = await sendPaymentSms(session.phone, smsText, payment.reference, getBaseUrl(req));
           smsSent = true; simulated = sms.simulated;
         } catch (err) { console.error("SMS error:", err.message); }
       }
@@ -1428,6 +1470,7 @@ function servePaymentPage(res, reference) {
 // ─── HTTP SERVER ─────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
+  console.log("REQUEST HIT:", req.method, req.url);
   try {
     // Handle CORS preflight
     if (req.method === "OPTIONS") {
@@ -1436,7 +1479,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    const url = new URL(req.url, PUBLIC_BASE_URL);
+    const url = new URL(req.url, getBaseUrl(req));
 
     if (url.pathname.startsWith("/api/")) { await handleApi(req, res, url); return; }
     if (url.pathname.startsWith("/voice/")) { await handleVoice(req, res, url); return; }
@@ -1451,7 +1494,7 @@ const server = http.createServer(async (req, res) => {
 
 // WebSocket upgrade (Exotel Voicebot)
 server.on("upgrade", (req, socket, head) => {
-  const url = new URL(req.url, PUBLIC_BASE_URL);
+  const url = new URL(req.url, getBaseUrl(req));
   if (url.pathname === "/exotel/voicebot") {
     handleVoicebotSocket(req, socket);
     return;
@@ -1459,14 +1502,19 @@ server.on("upgrade", (req, socket, head) => {
   socket.destroy();
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, "0.0.0.0", () => {
+  const displayUrl = PUBLIC_BASE_URL || `http://localhost:${PORT} (auto-detects ngrok/tunnel from Host header)`;
   console.log("─────────────────────────────────────────────────────────");
   console.log(`✅  Call Ticket app running at http://localhost:${PORT}`);
   console.log(`📱  ExoPhone: ${EXOTEL_EXOPHONE} (trial: ${EXOTEL_TRIAL_NUMBER})`);
-  console.log(`🌐  Public URL: ${PUBLIC_BASE_URL}`);
-  console.log(`📞  Inbound webhook: ${PUBLIC_BASE_URL}/voice/incoming`);
-  console.log(`🤖  Voicebot WS:     ${publicWsBaseUrl()}/exotel/voicebot`);
-  console.log(`🔧  Voicebot config: ${PUBLIC_BASE_URL}/exotel/voicebot-config`);
+  console.log(`🌐  Public URL: ${displayUrl}`);
+  console.log(`📞  Inbound webhook:  https://bobcat-relock-imprison.ngrok-free.dev/voice/incoming`);
+  console.log(`🤖  Voicebot WS:     https://bobcat-relock-imprison.ngrok-free.dev/exotel/voicebot`);
+  console.log(`🔧  Voicebot config: https://bobcat-relock-imprison.ngrok-free.dev/exotel/voicebot-config`);
   console.log(`📊  Provider: ${liveProvider()} | Exotel ready: ${exotelReady()}`);
+  if (!PUBLIC_BASE_URL) {
+    console.log(`⚡  TIP: Set PUBLIC_BASE_URL=https://your-ngrok-url.ngrok-free.app in .env`);
+    console.log(`         or the server will auto-detect it from each incoming request.`);
+  }
   console.log("─────────────────────────────────────────────────────────");
 });
