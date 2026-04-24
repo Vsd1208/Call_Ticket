@@ -1,172 +1,272 @@
-# Call Ticket Booking
+# 🚆 Call Ticket Booking — AI Voice Bot
 
-A browser-based prototype for booking a travel ticket through a multilingual voice bot.
+A multilingual AI-powered voice bot for booking train tickets over the phone or via a browser chat interface. Built with **Twilio** for telephony, **Google Gemini** for natural language understanding, and a deterministic fallback bot for offline use. Supports English and Hindi.
 
-## What it does
+---
 
-- Listens to a caller through the browser microphone when speech recognition is available.
-- Detects English or Hindi-style input and replies with browser speech synthesis.
-- Extracts booking details from speech or typed text:
-  - source station
-  - destination station
-  - travel date
-  - passenger name
-  - passenger age
-  - seat preference
-- Shows a live ticket draft and creates a local confirmation reference.
-- Uses a locally trained intent model for booking, detail collection, confirmation, reset, and greeting intents.
+## ✨ Features
 
-## Try it
+- **Real phone calls via Twilio** — inbound and outbound voice calls with full conversation flow
+- **AI-powered conversations** — Google Gemini 2.0 Flash for natural slot extraction and dialogue
+- **Browser interface** — works with microphone (Chrome/Edge) or typed input
+- **Multilingual** — English and Hindi (transliterated), with auto-detection
+- **SMS payment links** — automatically sent to the caller after booking confirmation
+- **Payment deadline enforcement** — rejects payment if fewer than 15 minutes remain before departure
+- **Exotel support** — optional alternative telephony provider for Indian numbers
+- **Simulation mode** — full end-to-end demo with zero telephony credentials
+- **Offline bot model** — local Naive Bayes classifier when Gemini is unavailable
 
-Open `index.html` in a browser.
+---
 
-For best microphone support, use Chrome or Edge. If speech recognition is unavailable, use the text box:
+## 📞 Live Call Demo
 
-```text
-Book a ticket from Delhi to Mumbai tomorrow for Rahul age 28 window seat
+A real phone call flow powered by Twilio + Gemini:
+
+```
+Caller dials your Twilio number
+         ↓
+POST /voice/incoming  ← Twilio webhook
+         ↓
+Twilio <Gather> collects speech
+         ↓
+POST /voice/process  ← speech result
+         ↓
+Gemini AI extracts booking slots
+  (journey type, route, date, time, name, age)
+         ↓
+Bot responds via <Say>, continues gathering
+         ↓
+Caller says "confirm"
+         ↓
+Payment link created → SMS sent via Twilio
 ```
 
-You can also answer one slot at a time:
+---
 
-```text
-Delhi
-Mumbai
-tomorrow
-Rahul
-28
+## 🗂 Project Structure
+
+```
+├── server.js              # Node.js HTTP server — all API, voice, and WebSocket logic
+├── app.js                 # Browser frontend logic
+├── index.html             # Single-page UI
+├── styles.css             # UI styles
+├── call.js                # Standalone Twilio outbound call script
+├── bot-model.js           # Pre-trained local intent classifier
+├── bot/
+│   ├── train.js           # Naive Bayes trainer
+│   └── training-data.json # Intent training examples
+├── scripts/
+│   └── simulate-call.js   # CLI call simulator (no Twilio needed)
+├── .env.example           # Environment variable template
+├── start.ps1              # PowerShell startup script (Windows)
+├── start.bat              # Batch startup script (Windows)
+└── tunnel.js              # Localtunnel helper
 ```
 
-## Train the bot
+---
 
-Training data lives in `bot/training-data.json`. Add more caller phrases there, then run:
+## 🚀 Quick Start
+
+### Prerequisites
+
+- [Node.js](https://nodejs.org/) v16+
+- A [Twilio account](https://www.twilio.com/) with a voice-capable phone number
+- A public HTTPS URL for Twilio webhooks — use [ngrok](https://ngrok.com/) or [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)
+
+### 1. Clone and configure
+
+```bash
+git clone https://github.com/your-username/call-ticket-booking.git
+cd call-ticket-booking
+cp .env.example .env
+```
+
+### 2. Fill in `.env`
+
+```env
+PORT=3000
+PUBLIC_BASE_URL=https://your-ngrok-url.ngrok-free.app
+
+GEMINI_API_KEY=your_gemini_key
+
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token
+TWILIO_FROM_NUMBER=+1xxxxxxxxxx
+```
+
+### 3. Expose your local server
+
+```bash
+ngrok http 3000
+```
+
+Copy the HTTPS URL and set it as `PUBLIC_BASE_URL` in `.env`.
+
+### 4. Configure the Twilio webhook
+
+In your [Twilio Console](https://console.twilio.com/), go to your phone number settings and set:
+
+- **Voice → A call comes in → Webhook:**
+  ```
+  https://your-ngrok-url.ngrok-free.app/voice/incoming
+  ```
+- Method: `HTTP POST`
+
+### 5. Start the server
+
+```bash
+node server.js
+```
+
+Call your Twilio number and the bot picks up.
+
+---
+
+## ⚙️ Configuration
+
+| Variable | Required | Description |
+|---|---|---|
+| `PUBLIC_BASE_URL` | Yes | Public HTTPS URL (ngrok/tunnel). Used to build Twilio callback URLs. |
+| `TWILIO_ACCOUNT_SID` | Yes (for calls) | From your [Twilio Console](https://console.twilio.com/) |
+| `TWILIO_AUTH_TOKEN` | Yes (for calls) | From your Twilio Console |
+| `TWILIO_FROM_NUMBER` | Yes (for calls) | Your Twilio phone number in E.164 format (e.g. `+19062993655`) |
+| `GEMINI_API_KEY` | Recommended | Google Gemini API key — [get one free](https://aistudio.google.com/apikey) |
+| `PORT` | No | Server port, defaults to `3000` |
+
+Without Twilio credentials the server runs in **simulation mode** — calls and SMS are handled locally.
+
+---
+
+## 🗣 Example Conversation
+
+```
+Bot:  "Hello! Welcome to the ticket booking service.
+       Is your journey reserved or unreserved?"
+
+You:  "Reserved journey from Delhi to Mumbai tomorrow for Rahul age 28"
+
+Bot:  "Got it — reserved, Delhi to Mumbai, tomorrow, Rahul, age 28.
+       What is the train departure time?"
+
+You:  "10:30 AM"
+
+Bot:  "I have all the details. A reserved journey from Delhi to Mumbai
+       on 2026-04-25 at 10:30 for Rahul, age 28. You must pay before 10:15.
+       Say confirm to receive the payment link by SMS, or cancel to start over."
+
+You:  "Confirm"
+
+Bot:  "I have sent the payment link to your phone by SMS.
+       Your reference number is CTB-482910. Please pay before 10:15.
+       Thank you for calling."
+
+[SMS received]: "Pay Rs 180 for ticket CTB-482910: https://…/pay/CTB-482910. Pay before 2026-04-25 10:15."
+```
+
+---
+
+## 🔌 API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/call/config` | Provider status and webhook URLs |
+| `POST` | `/api/call/start` | Trigger an outbound Twilio call |
+| `POST` | `/api/chat` | Browser chat — message → AI response + slots |
+| `GET` | `/api/chat/status` | AI availability and active model |
+| `POST` | `/api/payment/create` | Create a payment link |
+| `GET` | `/api/sms/outbox` | View simulated SMS messages |
+| `GET` | `/api/voicebot/events` | Recent Voicebot WebSocket events |
+| `POST` | `/api/simulate/call` | Simulate a full call without Twilio |
+| `POST` | `/voice/incoming` | **Twilio inbound call webhook** |
+| `POST` | `/voice/process` | **Twilio speech result webhook** |
+| `GET` | `/exotel/voicebot-config` | Exotel Voicebot WebSocket config |
+| `WS` | `/exotel/voicebot` | Exotel Voicebot WebSocket |
+| `GET` | `/pay/:reference` | Demo payment page |
+
+---
+
+## 📲 Outbound Calls
+
+The `call.js` script places a direct outbound call via the Twilio API:
+
+```bash
+node call.js
+```
+
+Or use the **Call Now** panel in the browser UI — enter any E.164 number (e.g. `+918897587467`) and click **Call**.
+
+---
+
+## 🧪 Testing Without a Phone
+
+**Browser demo:** Open [http://localhost:3000](http://localhost:3000) and type or speak your journey details.
+
+**CLI simulator** (no Twilio needed):
+```bash
+node scripts/simulate-call.js
+```
+
+View simulated SMS messages at:
+```
+http://localhost:3000/api/sms/outbox
+```
+
+---
+
+## 🤖 Retraining the Local Bot
+
+The offline fallback uses a Naive Bayes model trained on examples in `bot/training-data.json`. Add more phrases and retrain:
 
 ```bash
 node bot/train.js
 ```
 
-That command regenerates `bot-model.js`, which is loaded by `index.html` before `app.js`.
+This regenerates `bot-model.js`. Slot parsing (stations, dates, times, names, ages) is handled by deterministic regex in `server.js` independently of the intent model.
 
-The current model is intentionally small and offline. It learns intent detection from examples, while station/date/name/age extraction is still handled by deterministic slot parsing in `app.js`.
+---
 
-## Make real phone calls
+## 🌐 Supported Languages
 
-The browser microphone flow works immediately, but the no-WiFi user flow is handled by the phone network: the user dials your Twilio number from any phone, speaks to the bot, and receives an SMS payment link. This project includes a no-dependency Node server with Twilio-compatible endpoints.
+| Language | Code | Support |
+|---|---|---|
+| English (India) | `en-IN` | Full (voice + text + AI) |
+| Hindi | `hi-IN` | Full — transliterated input supported (e.g. `"kal ke liye ticket chahiye"`) |
+| Tamil | `ta-IN` | Browser speech recognition only |
+| Telugu | `te-IN` | Browser speech recognition only |
+| Bengali | `bn-IN` | Browser speech recognition only |
+| Marathi | `mr-IN` | Browser speech recognition only |
 
-The included dummy toll-free-style number is:
+---
 
-```text
-+18005550199
-```
+## 🏗 Production Path
 
-That number is for local demos only. It is not actually callable until you replace it with a real provider number.
+To turn this into a production-grade system:
 
-Your Exotel screenshot details have been added as configuration defaults:
+1. **Hosted server** — deploy to Railway, Render, or a VPS (no tunnel needed)
+2. **Database** — replace in-memory sessions with PostgreSQL or Redis
+3. **Payment gateway** — integrate Razorpay, Stripe, or PayU instead of the demo page
+4. **Booking API** — connect to IRCTC, RedBus, or your transport provider's API
+5. **Auth + audit logs** — add caller authentication and compliance logging
+6. **IVR fallback** — handle poor speech recognition with DTMF (digit) input
 
-- ExoPhone: `04048218468`
-- Trial number: `09513886363`
-- App ID: `1230481`
-- Account SID: `srmuniversity3`
-- Region: Singapore / `api.exotel.com`
+---
 
-See `EXOTEL_SETUP.md` for the exact Exotel environment variables and webhook URLs. The trial PIN is intentionally not stored in this repo.
+## 📋 Requirements
 
-Start the local server:
+- Node.js 16+ (zero npm dependencies for `server.js`)
+- Chrome or Edge for browser microphone support
+- HTTPS public URL for Twilio webhooks
 
-```bash
-node server.js
-```
+---
 
-Then open:
+## 📄 License
 
-```text
-http://localhost:3000
-```
+MIT — see [LICENSE](./LICENSE) for details.
 
-The server exposes:
+---
 
-- `GET /api/call/config` - checks whether phone provider credentials are configured.
-- `POST /api/call/start` - starts an outbound call when Twilio credentials exist.
-- `POST /api/simulate/call` - simulates a complete phone conversation without Twilio.
-- `GET /api/sms/outbox` - shows simulated SMS payment links when Twilio is not configured.
-- `POST /api/payment/create` - creates a payment link for the browser demo.
-- `GET|POST /exotel/status` - receives Exotel call status callbacks.
-- `GET|POST /exotel/passthru` - receives Exotel Passthru call details.
-- `GET /exotel/voicebot-config` - returns the websocket URL for the Exotel Voicebot applet.
-- `WS /exotel/voicebot` - receives Exotel Voicebot websocket traffic.
-- `GET /api/voicebot/events` - shows recent Voicebot websocket connection events.
-- `POST /voice/incoming` - webhook for an incoming call.
-- `POST /voice/process` - receives speech results and continues the booking conversation.
-- `GET /pay/:reference` - demo payment page.
+## 🙏 Acknowledgements
 
-During a phone call, the bot asks for:
-
-- reserved or unreserved journey, including local train/general ticket
-- source station
-- destination station
-- travel date
-- train departure time
-- passenger name
-- passenger age
-
-After the caller confirms, the server generates a payment link and sends it by SMS when Exotel or Twilio SMS credentials are configured. The link is valid only until 15 minutes before the train departure time. If fewer than 15 minutes remain, the bot refuses that payment and asks the user to start a new booking for another train.
-
-## Test without a toll-free number
-
-Run the server:
-
-```bash
-node server.js
-```
-
-Then simulate a caller:
-
-```bash
-node scripts/simulate-call.js
-```
-
-The simulator sends a reserved Delhi to Mumbai booking, confirms it, creates a payment link, and stores the SMS in the local outbox. View simulated SMS messages at:
-
-```text
-http://localhost:3000/api/sms/outbox
-```
-
-You can also use the app's Call Now panel. Without Twilio credentials it returns a simulated call id instead of placing a real phone call.
-
-To receive calls from a real phone number:
-
-1. Create a Twilio account and buy or connect a voice-capable phone number.
-2. Expose this local server with a public HTTPS URL using a tunnel such as ngrok or Cloudflare Tunnel.
-3. Set that public URL as `PUBLIC_BASE_URL`.
-4. Configure the Twilio number voice webhook to:
-
-```text
-https://your-public-url/voice/incoming
-```
-
-To place outbound calls from the app, set these environment variables before starting the server:
-
-```powershell
-$env:TWILIO_ACCOUNT_SID="your_account_sid"
-$env:TWILIO_AUTH_TOKEN="your_auth_token"
-$env:TWILIO_FROM_NUMBER="+1234567890"
-$env:PUBLIC_BASE_URL="https://your-public-url"
-node server.js
-```
-
-Phone numbers must use E.164 format, for example `+919876543210`.
-
-In a real railway deployment, the final payment link should come from your payment gateway, and successful payment should trigger the official railway or transit booking API. This demo creates a local payment page so the full conversation can be tested before those integrations exist.
-
-## Production architecture
-
-To turn this prototype into a real phone-call booking system:
-
-1. Buy or connect a phone number through a telephony provider.
-2. Stream call audio to speech-to-text with language detection.
-3. Send transcripts into a slot-filling service that extracts trip details.
-4. Confirm details with the caller using text-to-speech.
-5. Take payment or wallet authorization.
-6. Call the railway, bus, event, or transport booking API.
-7. Send the ticket by SMS, WhatsApp, or email.
-
-The current app keeps booking data in the browser only. A real deployment needs backend storage, authentication, payment handling, audit logs, and integration with an official booking provider.
+- [Twilio](https://www.twilio.com/) for voice and SMS infrastructure
+- [Google Gemini](https://deepmind.google/technologies/gemini/) for the conversational AI
+- [ngrok](https://ngrok.com/) / [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) for local development tunneling
