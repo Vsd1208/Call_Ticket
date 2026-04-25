@@ -292,31 +292,31 @@ function exoml(message, req) {
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="female" language="en">
-    <![CDATA[${message}]]>
-  </Say>
 
-  <Pause length="1"/>
-
-  <Record 
-    action="${action}" 
+  <Gather 
+    input="speech"
+    action="${action}"
     method="POST"
-    timeout="7"
-    transcribe="true"
-    transcribeCallback="${action}"
-    playBeep="false"
-    maxLength="15"
-    finishOnKey="#"
-  />
+    speechTimeout="auto"
+    language="en-IN"
+    hints="reserved,unreserved"
+  >
+    <Say voice="Polly.Joanna" language="en-US">
+      ${message}
+    </Say>
+  </Gather>
+
+  <Say>I didn’t catch that. Please say reserved or unreserved.</Say>
 
   <Redirect method="POST">${action}</Redirect>
+
 </Response>`;
 }
 
 function exomlSay(message) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="female" language="en"><![CDATA[${message}]]></Say>
+  <Say voice="Polly.Joanna" language="en-US">${message}</Say>
   <Hangup/>
 </Response>`;
 }
@@ -1029,7 +1029,11 @@ async function handleVoice(req, res, url) {
   // ── POST /voice/process — caller spoke or transcription arrived ───────────
   if (url.pathname === "/voice/process") {
     const body = querystring.parse(await readBody(req));
-    const speech = extractSpeech(body);
+    console.log("BODY:", body);
+    const speech =
+  body.SpeechResult ||
+  body.speechResult ||
+  "";
     const callSid = body.CallSid || body.callsid || body.CallId || "local-call";
     const session = getSession(callSid);
     console.log("----- VOICE DEBUG -----");
