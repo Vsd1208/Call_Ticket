@@ -16,21 +16,23 @@ function getBaseUrl(req) {
   if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
   const host = req && req.headers && req.headers.host;
   if (!host) return `http://localhost:${PORT}`;
-  // Detect if this is an https host (ngrok, etc.)
-  const proto = (host.includes("ngrok") || host.includes("localhost.run") || host.includes("serveo") || !host.includes("localhost"))
-    ? "https"
-    : "http";
+  const proto =
+    host.includes("ngrok") ||
+    host.includes("localhost.run") ||
+    host.includes("serveo") ||
+    !host.includes("localhost")
+      ? "https"
+      : "http";
   return `${proto}://${host}`;
 }
+
 const DUMMY_TOLL_FREE_NUMBER = process.env.DUMMY_TOLL_FREE_NUMBER || "+18005550199";
-const EXOTEL_EXOPHONE = process.env.EXOTEL_EXOPHONE || "04048218468";
-const EXOTEL_TRIAL_NUMBER = process.env.EXOTEL_TRIAL_NUMBER || "08897587467";
-const EXOTEL_APP_ID = process.env.EXOTEL_APP_ID || "1230481";
+const TWILIO_PHONE_NUMBER    = process.env.TWILIO_FROM_NUMBER || "";
 const ROOT = __dirname;
 
-const sessions = new Map();
-const payments = new Map();
-const smsOutbox = [];
+const sessions      = new Map();
+const payments      = new Map();
+const smsOutbox     = [];
 const voicebotEvents = [];
 
 // ─── ENV LOADER ─────────────────────────────────────────────────────────────
@@ -46,7 +48,10 @@ function loadLocalEnv() {
     if (separator === -1) continue;
     const key = trimmed.slice(0, separator).trim();
     let value = trimmed.slice(separator + 1).trim();
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
       value = value.slice(1, -1);
     }
     if (!process.env[key]) process.env[key] = value;
@@ -69,7 +74,11 @@ const stations = [
 ];
 
 function normalize(text) {
-  return String(text || "").toLowerCase().replace(/[.,!?]/g, " ").replace(/\s+/g, " ").trim();
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[.,!?]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function stationPattern() {
@@ -105,21 +114,110 @@ function formatDate(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+const MONTH_NUMBERS = {
+  jan: "01", january: "01",
+  feb: "02", february: "02",
+  mar: "03", march: "03",
+  apr: "04", april: "04",
+  may: "05",
+  jun: "06", june: "06",
+  jul: "07", july: "07",
+  aug: "08", august: "08",
+  sep: "09", sept: "09", september: "09",
+  oct: "10", october: "10",
+  nov: "11", november: "11",
+  dec: "12", december: "12"
+};
+
+function normalizeSpokenDate(text) {
+  let clean = String(text || "").toLowerCase();
+  const numberWords = {
+    "thirty one": 31, "thirty-one": 31,
+    "thirty": 30,
+    "twenty nine": 29, "twenty-nine": 29,
+    "twenty eight": 28, "twenty-eight": 28,
+    "twenty seven": 27, "twenty-seven": 27,
+    "twenty six": 26, "twenty-six": 26,
+    "twenty five": 25, "twenty-five": 25,
+    "twenty four": 24, "twenty-four": 24,
+    "twenty three": 23, "twenty-three": 23,
+    "twenty two": 22, "twenty-two": 22,
+    "twenty one": 21, "twenty-one": 21,
+    "twenty": 20,
+    "nineteen": 19, "eighteen": 18, "seventeen": 17, "sixteen": 16, "fifteen": 15,
+    "fourteen": 14, "thirteen": 13, "twelve": 12, "eleven": 11, "ten": 10,
+    "nine": 9, "eight": 8, "seven": 7, "six": 6, "five": 5,
+    "four": 4, "three": 3, "two": 2, "one": 1
+  };
+  const yearWords = {
+    "twenty twenty six": 2026,
+    "twenty twenty seven": 2027,
+    "twenty twenty eight": 2028,
+    "two thousand twenty six": 2026,
+    "two thousand and twenty six": 2026,
+    "two thousand twenty seven": 2027,
+    "two thousand and twenty seven": 2027,
+    "two thousand twenty eight": 2028,
+    "two thousand and twenty eight": 2028
+  };
+
+  for (const [phrase, value] of Object.entries(yearWords)) {
+    clean = clean.replace(new RegExp(`\\b${phrase}\\b`, "g"), String(value));
+  }
+  for (const [phrase, value] of Object.entries(numberWords)) {
+    clean = clean.replace(new RegExp(`\\b${phrase}\\b`, "g"), String(value));
+  }
+  return clean;
+}
+
+function normalizeYear(year) {
+  const y = String(year || "");
+  if (/^\d{2}$/.test(y)) return `20${y}`;
+  return y;
+}
+
+function validDateParts(day, month, year) {
+  const d = Number(day);
+  const m = Number(month);
+  const y = Number(year);
+  if (y < 2000 || y > 2099 || m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const date = new Date(y, m - 1, d);
+  return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
+}
+
 function parseDate(text) {
+  const source = normalizeSpokenDate(text);
   const today = new Date();
-  if (/\btoday\b|aaj/.test(text)) return formatDate(today);
-  if (/\btomorrow\b|kal/.test(text)) {
-    const d = new Date(today); d.setDate(d.getDate() + 1); return formatDate(d);
+  if (/\btoday\b|aaj/.test(source)) return formatDate(today);
+  if (/\btomorrow\b|kal/.test(source)) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + 1);
+    return formatDate(d);
   }
-  // after N days
-  const daysMatch = text.match(/\bafter\s+(\d+)\s+days?\b/i);
+  const daysMatch = source.match(/\bafter\s+(\d+)\s+days?\b/i);
   if (daysMatch) {
-    const d = new Date(today); d.setDate(d.getDate() + Number(daysMatch[1])); return formatDate(d);
+    const d = new Date(today);
+    d.setDate(d.getDate() + Number(daysMatch[1]));
+    return formatDate(d);
   }
-  const iso = text.match(/\b(20\d{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b/);
+  const iso = source.match(/\b(20\d{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b/);
   if (iso) return `${iso[1]}-${iso[2].padStart(2, "0")}-${iso[3].padStart(2, "0")}`;
-  const indian = text.match(/\b(0?[1-9]|[12]\d|3[01])[-/](0?[1-9]|1[0-2])[-/](20\d{2})\b/);
-  if (indian) return `${indian[3]}-${indian[2].padStart(2, "0")}-${indian[1].padStart(2, "0")}`;
+  const indian = source.match(/\b(0?[1-9]|[12]\d|3[01])[-/](0?[1-9]|1[0-2])[-/](20\d{2}|\d{2})\b/);
+  if (indian) {
+    const year = normalizeYear(indian[3]);
+    if (validDateParts(indian[1], indian[2], year)) return `${year}-${indian[2].padStart(2, "0")}-${indian[1].padStart(2, "0")}`;
+  }
+  const spacedIndian = source.match(/\b(0?[1-9]|[12]\d|3[01])\s+(0?[1-9]|1[0-2])\s+(20\d{2}|\d{2})\b/);
+  if (spacedIndian) {
+    const year = normalizeYear(spacedIndian[3]);
+    if (validDateParts(spacedIndian[1], spacedIndian[2], year)) return `${year}-${spacedIndian[2].padStart(2, "0")}-${spacedIndian[1].padStart(2, "0")}`;
+  }
+  const monthName = source.match(/\b(0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\s+([a-z]+)\s+(20\d{2}|\d{2})\b/i);
+  if (monthName && MONTH_NUMBERS[monthName[2]]) {
+    const month = MONTH_NUMBERS[monthName[2]];
+    const year = normalizeYear(monthName[3]);
+    if (validDateParts(monthName[1], month, year)) return `${year}-${month}-${monthName[1].padStart(2, "0")}`;
+  }
   return "";
 }
 
@@ -150,9 +248,9 @@ function parseAge(text) {
 
 function parseSeat(text) {
   if (/\bwindow\b/i.test(text)) return "Window";
-  if (/\baisle\b/i.test(text)) return "Aisle";
-  if (/\blower\b/i.test(text)) return "Lower";
-  if (/\bupper\b/i.test(text)) return "Upper";
+  if (/\baisle\b/i.test(text))  return "Aisle";
+  if (/\blower\b/i.test(text))  return "Lower";
+  if (/\bupper\b/i.test(text))  return "Upper";
   if (/\bmiddle\b/i.test(text)) return "Middle";
   return "";
 }
@@ -206,54 +304,316 @@ function estimateFare(session) {
 }
 
 function updateBooking(session, rawText) {
+  if (applyTrainSelection(session, rawText)) return;
+
+  const oldFrom = session.from;
+  const oldTo = session.to;
   const text = normalize(rawText);
   const ef = findStationAfter(text, ["from", "se"]);
   const et = findStationAfter(text, ["to", "tak"]);
   const all = findAllStations(text);
   if (ef) session.from = ef;
-  if (et) session.to = et;
+  if (et) session.to   = et;
   if (!session.from && all[0]) session.from = all[0];
   if (!session.to) {
     const other = all.find(s => s !== session.from);
     if (other) session.to = other;
   }
-  const date = parseDate(text);
-  const name = parseName(rawText) || (!session.name && session.from && session.to && session.date ? parseDirectName(rawText) : "");
-  const age = parseAge(rawText);
-  const seat = parseSeat(rawText);
-  const jt = parseJourneyType(rawText);
+  const date    = parseDate(text);
+  const name    = parseName(rawText) || (!session.name && session.from && session.to && session.date ? parseDirectName(rawText) : "");
+  const age     = parseAge(rawText);
+  const seat    = parseSeat(rawText);
+  const jt      = parseJourneyType(rawText);
   const depTime = parseDepartureTime(rawText);
-  if (date) session.date = date;
-  if (name) session.name = name;
-  if (age) session.age = age;
-  if (seat) session.seat = seat;
-  if (jt) session.journeyType = jt;
+  if (date)    session.date          = date;
+  if (name)    session.name          = name;
+  if (age)     session.age           = age;
+  if (seat)    session.seat          = seat;
+  if (jt)      session.journeyType   = jt;
   if (depTime) session.departureTime = depTime;
+
+  if (session.from !== oldFrom || session.to !== oldTo) {
+    session.trainOptions = [];
+    session.trainSelected = "";
+  }
 }
 
-function nextPrompt(session) {
-  if (!session.journeyType) return "Is this journey reserved or unreserved? For example, a local train or general compartment is unreserved, and a sleeper or air conditioned train is reserved.";
-  if (!session.from) return "Which station are you starting from?";
-  if (!session.to) return "Which station are you going to?";
-  if (!session.date) return "What is your travel date? You can say today, tomorrow, or give the date.";
-  if (!session.departureTime) return "What is the train departure time? For example, 9 30 AM or 14 00.";
-  if (!session.name) return "What is the passenger name?";
-  if (!session.age) return "What is the passenger age?";
-  const dl = paymentDeadline(session);
-  if (!canStillPay(session)) return "Sorry, the payment window has closed because less than 15 minutes remain before departure. Please start a new booking for a different train.";
-  return `I have your booking details. A ${session.journeyType.toLowerCase()} journey from ${session.from} to ${session.to} on ${session.date} at ${session.departureTime} for ${session.name}, age ${session.age}. You must pay before ${dl}. Please say confirm to receive the payment link by SMS, or say cancel to start over.`;
+// ─── STATION CODE MAP ────────────────────────────────────────────────────────
+
+const STATION_CODE_MAP = {
+  chennai:   "MAS",
+  hyderabad: "HYB",
+  delhi:     "NDLS",
+  mumbai:    "CST",
+  bangalore: "SBC",
+  bengaluru: "SBC",
+  kolkata:   "HWH",
+  pune:      "PUNE",
+  ahmedabad: "ADI",
+  jaipur:    "JP",
+  lucknow:   "LKO"
+};
+
+function normalizeCity(name) {
+  return STATION_CODE_MAP[name.toLowerCase().trim()] || null;
 }
+
+// ─── TRAINS BETWEEN STATIONS (RapidAPI) ──────────────────────────────────────
+
+const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST || "trains.p.rapidapi.com";
+const RAPIDAPI_PATH_TEMPLATE =
+  process.env.RAPIDAPI_PATH_TEMPLATE || "/v1/railways/trains/{from}/{to}";
+
+function rapidApiPath(fromCode, toCode) {
+  return RAPIDAPI_PATH_TEMPLATE
+    .replaceAll("{from}", encodeURIComponent(fromCode))
+    .replaceAll("{to}", encodeURIComponent(toCode));
+}
+
+function firstValue(obj, keys) {
+  if (!obj || typeof obj !== "object") return "";
+  for (const key of keys) {
+    const value = obj[key];
+    if (value !== undefined && value !== null && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+  return "";
+}
+
+function findTrainArray(value, depth = 0) {
+  if (!value || depth > 4) return [];
+  if (Array.isArray(value)) {
+    if (
+      value.some(item =>
+        item && typeof item === "object" &&
+        firstValue(item, ["train_name", "trainName", "name", "train_number", "trainNumber", "number"])
+      )
+    ) {
+      return value;
+    }
+    for (const item of value) {
+      const nested = findTrainArray(item, depth + 1);
+      if (nested.length) return nested;
+    }
+    return [];
+  }
+  if (typeof value === "object") {
+    for (const key of ["data", "trains", "train", "results", "response", "body"]) {
+      const nested = findTrainArray(value[key], depth + 1);
+      if (nested.length) return nested;
+    }
+    for (const nestedValue of Object.values(value)) {
+      const nested = findTrainArray(nestedValue, depth + 1);
+      if (nested.length) return nested;
+    }
+  }
+  return [];
+}
+
+function normalizeTrain(raw, index) {
+  const number = raw.train_number || raw.trainNumber || raw.number || "";
+
+  const name =
+    raw.train_name ||
+    raw.trainName ||
+    raw.name ||
+    (number ? `Train ${number}` : `Train option ${index + 1}`);
+
+  // 🎯 IRCTC uses "from_std" for departure time
+  const time =
+    raw.from_std ||
+    raw.departure_time ||
+    raw.departureTime ||
+    raw.start_time ||
+    "--:--";
+
+  return {
+    number: number || "",
+    name: name || `Train option ${index + 1}`,
+    time: time || "--:--"
+  };
+}
+
+async function getTrains(from, to) {
+  const fromCode = normalizeCity(from);
+  const toCode   = normalizeCity(to);
+
+  if (!fromCode || !toCode) {
+    return [{ name: "Invalid stations", time: "" }];
+  }
+
+  const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || "";
+  if (!RAPIDAPI_KEY) {
+    console.warn("[RapidAPI] RAPIDAPI_KEY not set — returning placeholder trains.");
+    return [
+      { name: "Sample Express", time: "06:00" },
+      { name: "Rajdhani Express", time: "14:30" },
+      { name: "Shatabdi Express", time: "20:00" }
+    ];
+  }
+
+  return new Promise((resolve) => {
+    const options = {
+      hostname: RAPIDAPI_HOST,
+      path: rapidApiPath(fromCode, toCode),
+      method: "GET",
+      headers: {
+        "x-rapidapi-key":  RAPIDAPI_KEY,
+        "x-rapidapi-host": RAPIDAPI_HOST
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let body = "";
+      res.on("data", chunk => { body += chunk; });
+      res.on("end", () => {
+        try {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            console.error(`[RapidAPI] HTTP ${res.statusCode}: ${body.slice(0, 300)}`);
+            resolve([{ name: "Error fetching trains", time: "" }]);
+            return;
+          }
+          const data = JSON.parse(body);
+          const trains = findTrainArray(data);
+          if (trains.length === 0) {
+            resolve([{ name: "No trains found", time: "" }]);
+            return;
+          }
+          resolve(trains.slice(0, 5).map(normalizeTrain));
+        } catch (err) {
+          console.error("[RapidAPI] Parse error:", err.message);
+          resolve([{ name: "Error fetching trains", time: "" }]);
+        }
+      });
+    });
+
+    req.on("error", (err) => {
+      console.error("[RapidAPI] Request error:", err.message);
+      resolve([{ name: "Error fetching trains", time: "" }]);
+    });
+
+    req.setTimeout(10000, () => {
+      req.destroy(new Error("RapidAPI request timed out"));
+    });
+
+    req.end();
+  });
+}
+
+function trainOptionLabel(train) {
+  const number = train.number ? `${train.number} ` : "";
+  return `${number}${train.name}`.trim();
+}
+
+function isPlaceholderTrain(train) {
+  return /^(invalid stations|no trains found|error fetching trains)$/i.test(train.name || "");
+}
+
+function applyTrainSelection(session, rawText) {
+  if (!session || session.trainSelected || !Array.isArray(session.trainOptions)) return false;
+  const options = session.trainOptions.filter(t => !isPlaceholderTrain(t));
+  if (!options.length) return false;
+
+  const text = normalize(rawText);
+  const digit = String(rawText || "").match(/\b([1-5])\b/);
+  let selected = null;
+  if (digit) selected = options[Number(digit[1]) - 1] || null;
+  if (!selected) {
+    selected = options.find(t => {
+      const number = normalize(t.number);
+      const name = normalize(t.name);
+      return (number && text.includes(number)) || (name && text.includes(name));
+    }) || null;
+  }
+  if (!selected) return false;
+
+  session.trainSelected = trainOptionLabel(selected);
+  if (selected.time) session.departureTime = selected.time;
+  return true;
+}
+
+function needsTrainSelection(session) {
+  if (!session.from || !session.to || !session.date || session.trainSelected) return false;
+  return !(Array.isArray(session.trainOptions) && session.trainOptions.length > 0 && session.trainOptions.every(isPlaceholderTrain));
+}
+
+// ─── SESSION MANAGEMENT ──────────────────────────────────────────────────────
 
 function getSession(callSid) {
   const key = callSid || "local-call";
   if (!sessions.has(key)) {
-    sessions.set(key, { from: "", to: "", date: "", departureTime: "", name: "", age: "", seat: "Any", journeyType: "", phone: "" });
+    sessions.set(key, {
+      from: "",
+      to: "",
+      date: "",
+      departureTime: "",
+      name: "",
+      age: "",
+      seat: "Any",
+      journeyType: "",
+      phone: "",
+      trainOptions: [],
+      trainSelected: ""
+    });
   }
   return sessions.get(key);
 }
 
 function isComplete(session) {
-  return Boolean(session.journeyType && session.from && session.to && session.date && session.departureTime && session.name && session.age);
+  return Boolean(
+    session.journeyType &&
+    session.from &&
+    session.to &&
+    session.date &&
+    session.departureTime &&
+    session.name &&
+    session.age
+  );
+}
+
+// ─── NEXT PROMPT ─────────────────────────────────────────────────────────────
+
+async function nextPrompt(session) {
+  if (!session.journeyType)  return "Is this journey reserved or unreserved? You can say it, or press 1 for reserved and 2 for unreserved.";
+  if (!session.from)         return "Which station are you starting from?";
+  if (!session.to)           return "Which station are you going to?";
+  if (!session.date)         return "What is your travel date?";
+
+  // Train selection
+  if (!session.trainSelected) {
+    if (!session.trainOptions || session.trainOptions.length === 0) {
+      const trains = await getTrains(session.from, session.to);
+      session.trainOptions = trains;
+      if (trains.every(isPlaceholderTrain)) {
+        return `${trains[0].name}. Please tell me the train departure time.`;
+      }
+      let msg = "I found these trains: ";
+      trains.forEach((t, i) => { msg += `${i + 1}. ${trainOptionLabel(t)}${t.time ? " at " + t.time : ""}. `; });
+      msg += "Which train do you prefer?";
+      return msg;
+    }
+    if (session.trainOptions.every(isPlaceholderTrain)) {
+      if (!session.departureTime) return "Please tell me the train departure time.";
+    } else {
+      return "Please tell me which train you prefer by number or name.";
+    }
+  }
+
+  if (!session.departureTime) return "What is the train departure time?";
+
+  if (!session.name) return "What is the passenger name?";
+  if (!session.age)  return "What is the passenger age?";
+
+  if (!canStillPay(session))
+    return "Sorry, the payment window has closed. Please choose another train.";
+
+  return (
+    `You are traveling from ${session.from} to ${session.to} on ${session.date} ` +
+    `by ${session.trainSelected} at ${session.departureTime}. ` +
+    `Passenger ${session.name}, age ${session.age}. ` +
+    `Please say confirm to proceed or cancel to restart.`
+  );
 }
 
 // ─── UTILS ───────────────────────────────────────────────────────────────────
@@ -267,64 +627,31 @@ function xml(v) {
     .replace(/'/g, "&apos;");
 }
 
-function twimlGather(message, lang = "en-IN") {
-  // Exotel uses Say + GetDigits/Record; this works for Twilio. Exotel uses the Passthru/Voicebot separately.
+// Twilio TwiML: Gather (speech + DTMF)
+function twimlGather(message, baseUrl, lang = "en-IN") {
+  const processUrl = `${baseUrl}/voice/process`;
+  const incomingUrl = `${baseUrl}/voice/incoming`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech" action="/voice/process" method="POST" speechTimeout="auto" language="${lang}">
+  <Gather input="speech dtmf" action="${xml(processUrl)}" method="POST" timeout="10" speechTimeout="auto" actionOnEmptyResult="true" language="${lang}" hints="reserved,unreserved,confirm,cancel,Delhi,Mumbai,Chennai,Bengaluru,Kolkata,Hyderabad,Pune,Ahmedabad,Jaipur,Lucknow">
     <Say voice="alice" language="${lang}">${xml(message)}</Say>
   </Gather>
   <Say voice="alice" language="${lang}">I did not hear anything. Let me try again.</Say>
-  <Redirect method="POST">/voice/incoming</Redirect>
+  <Redirect method="POST">${xml(incomingUrl)}</Redirect>
 </Response>`;
 }
 
+// Twilio TwiML: Say + Hangup
 function twimlSay(message, lang = "en-IN") {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say voice="alice" language="${lang}">${xml(message)}</Say>
-</Response>`;
-}
-
-// Exotel ExoML — uses Record applet for speech capture
-function exoml(message, req) {
-  const action = `${getBaseUrl(req)}/voice/process`;
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-
-  <Gather 
-    input="speech"
-    action="${action}"
-    method="POST"
-    speechTimeout="auto"
-    language="en-IN"
-    hints="reserved,unreserved"
-  >
-    <Say voice="Polly.Joanna" language="en-US">
-      ${message}
-    </Say>
-  </Gather>
-
-  <Say>I didn’t catch that. Please say reserved or unreserved.</Say>
-
-  <Redirect method="POST">${action}</Redirect>
-
-</Response>`;
-}
-
-function exomlSay(message) {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say voice="Polly.Joanna" language="en-US">${message}</Say>
   <Hangup/>
 </Response>`;
 }
 
-// Exotel sends speech via Record+transcribe or SpeechResult;
-// extract whatever field has the caller's words
 function extractSpeech(body) {
-  return String(
+  const raw = String(
     body.TranscriptionText ||
     body.SpeechResult ||
     body.speech ||
@@ -334,6 +661,8 @@ function extractSpeech(body) {
     body.digits ||
     ""
   ).trim();
+  const dtmfMap = { "1": "reserved", "2": "unreserved", "9": "confirm", "0": "cancel" };
+  return dtmfMap[raw] || raw;
 }
 
 function readBody(req) {
@@ -357,22 +686,22 @@ function sendJson(res, status, value) {
 function publicWsBaseUrl(req) {
   const base = getBaseUrl(req);
   if (base.startsWith("https://")) return base.replace("https://", "wss://");
-  if (base.startsWith("http://")) return base.replace("http://", "ws://");
+  if (base.startsWith("http://"))  return base.replace("http://", "ws://");
   return `ws://${base}`;
 }
 
 const staticTypes = {
   ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
+  ".js":   "text/javascript; charset=utf-8",
+  ".css":  "text/css; charset=utf-8",
   ".json": "application/json; charset=utf-8",
-  ".md": "text/markdown; charset=utf-8"
+  ".md":   "text/markdown; charset=utf-8"
 };
 
 function serveStatic(req, res) {
   const requested = decodeURIComponent(new URL(req.url, getBaseUrl(req)).pathname);
-  const safePath = path.normalize(requested === "/" ? "/index.html" : requested).replace(/^(\.\.[\\/])+/, "");
-  const filePath = path.join(ROOT, safePath);
+  const safePath  = path.normalize(requested === "/" ? "/index.html" : requested).replace(/^(\.\.[\\/])+/, "");
+  const filePath  = path.join(ROOT, safePath);
   if (!filePath.startsWith(ROOT)) { send(res, 403, "text/plain", "Forbidden"); return; }
   fs.readFile(filePath, (err, data) => {
     if (err) { send(res, 404, "text/plain", "Not found"); return; }
@@ -383,40 +712,81 @@ function serveStatic(req, res) {
 // ─── PROVIDER DETECTION ──────────────────────────────────────────────────────
 
 function twilioReady() {
-  return Boolean(process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN && process.env.TWILIO_FROM_NUMBER);
-}
-
-function exotelReady() {
-  return Boolean(process.env.EXOTEL_ACCOUNT_SID && process.env.EXOTEL_API_KEY && process.env.EXOTEL_API_TOKEN && EXOTEL_EXOPHONE && EXOTEL_APP_ID);
+  return Boolean(
+    process.env.TWILIO_ACCOUNT_SID &&
+    process.env.TWILIO_AUTH_TOKEN &&
+    process.env.TWILIO_FROM_NUMBER
+  );
 }
 
 function liveProvider() {
-  if (exotelReady()) return "exotel";
   if (twilioReady()) return "twilio";
   return "simulation";
 }
 
 function activePhoneNumber() {
-  if (exotelReady()) return EXOTEL_EXOPHONE;
   if (twilioReady()) return process.env.TWILIO_FROM_NUMBER;
   return DUMMY_TOLL_FREE_NUMBER;
 }
 
-function exotelSubdomain() {
-  return process.env.EXOTEL_SUBDOMAIN || "api.in.exotel.com";
+// ─── HTTP HELPERS ────────────────────────────────────────────────────────────
+
+function httpsPost(options, postData) {
+  return new Promise((resolve, reject) => {
+    const req = https.request(options, res => {
+      let body = "";
+      res.on("data", chunk => { body += chunk; });
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(body)); } catch { resolve(body); }
+        } else {
+          reject(new Error(`HTTP ${res.statusCode}: ${body}`));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.write(postData);
+    req.end();
+  });
 }
 
-function exotelFlowUrl() {
-  return process.env.EXOTEL_FLOW_URL ||
-    `http://my.exotel.com/${process.env.EXOTEL_ACCOUNT_SID}/exoml/start_voice/${EXOTEL_APP_ID}`;
+// ─── TWILIO CALL & SMS ───────────────────────────────────────────────────────
+
+function startTwilioCall(to, baseUrl) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken  = process.env.TWILIO_AUTH_TOKEN;
+  const from       = process.env.TWILIO_FROM_NUMBER;
+  const postData   = querystring.stringify({ To: to, From: from, Url: `${baseUrl}/voice/incoming` });
+  return httpsPost({
+    hostname: "api.twilio.com",
+    path:     `/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Calls.json`,
+    method:   "POST",
+    auth:     `${accountSid}:${authToken}`,
+    headers:  { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(postData) }
+  }, postData);
 }
 
-// ─── SMS / CALL PROVIDERS ────────────────────────────────────────────────────
+function sendTwilioSms(to, message) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken  = process.env.TWILIO_AUTH_TOKEN;
+  const from       = process.env.TWILIO_FROM_NUMBER;
+  const postData   = querystring.stringify({ To: to, From: from, Body: message });
+  return httpsPost({
+    hostname: "api.twilio.com",
+    path:     `/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Messages.json`,
+    method:   "POST",
+    auth:     `${accountSid}:${authToken}`,
+    headers:  { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(postData) }
+  }, postData);
+}
+
+// ─── SMS OUTBOX / PAYMENT SMS ────────────────────────────────────────────────
 
 function recordSms(to, message, reference = "") {
   const item = {
-    id: `SMS-${String(smsOutbox.length + 1).padStart(4, "0")}`,
-    to, message, reference, simulated: true,
+    id:        `SMS-${String(smsOutbox.length + 1).padStart(4, "0")}`,
+    to, message, reference,
+    simulated: true,
     createdAt: new Date().toISOString()
   };
   smsOutbox.push(item);
@@ -441,108 +811,13 @@ function callerPhoneFromWebhook(body) {
   return toE164(from) || toE164(to) || from || to;
 }
 
-function httpsPost(options, postData) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(options, res => {
-      let body = "";
-      res.on("data", chunk => { body += chunk; });
-      res.on("end", () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          try { resolve(JSON.parse(body)); } catch { resolve(body); }
-        } else {
-          reject(new Error(`HTTP ${res.statusCode}: ${body}`));
-        }
-      });
-    });
-    req.on("error", reject);
-    req.write(postData);
-    req.end();
-  });
-}
-
-function startTwilioCall(to, baseUrl) {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const from = process.env.TWILIO_FROM_NUMBER;
-  const postData = querystring.stringify({ To: to, From: from, Url: `${baseUrl}/voice/incoming` });
-  return httpsPost({
-    hostname: "api.twilio.com",
-    path: `/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Calls.json`,
-    method: "POST",
-    auth: `${accountSid}:${authToken}`,
-    headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(postData) }
-  }, postData);
-}
-
-function startExotelCall(to, baseUrl) {
-  const accountSid = process.env.EXOTEL_ACCOUNT_SID;
-  const apiKey = process.env.EXOTEL_API_KEY;
-  const apiToken = process.env.EXOTEL_API_TOKEN;
-  const postData = querystring.stringify({
-    From: to,
-    CallerId: EXOTEL_EXOPHONE,
-    Url: exotelFlowUrl(),
-    CallType: "trans",
-    StatusCallback: `${baseUrl}/exotel/status`
-  });
-  return httpsPost({
-    hostname: exotelSubdomain(),
-    path: `/v1/Accounts/${encodeURIComponent(accountSid)}/Calls/connect.json`,
-    method: "POST",
-    auth: `${apiKey}:${apiToken}`,
-    headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(postData) }
-  }, postData);
-}
-
-function sendTwilioSms(to, message) {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken = process.env.TWILIO_AUTH_TOKEN;
-  const from = process.env.TWILIO_FROM_NUMBER;
-  const postData = querystring.stringify({ To: to, From: from, Body: message });
-  return httpsPost({
-    hostname: "api.twilio.com",
-    path: `/2010-04-01/Accounts/${encodeURIComponent(accountSid)}/Messages.json`,
-    method: "POST",
-    auth: `${accountSid}:${authToken}`,
-    headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(postData) }
-  }, postData);
-}
-
-function sendExotelSms(to, message, baseUrl) {
-  const accountSid = process.env.EXOTEL_ACCOUNT_SID;
-  const apiKey = process.env.EXOTEL_API_KEY;
-  const apiToken = process.env.EXOTEL_API_TOKEN;
-  const postData = querystring.stringify({
-    From: EXOTEL_EXOPHONE,
-    To: to,
-    Body: message,
-    StatusCallback: `${baseUrl}/exotel/sms-status`
-  });
-  return httpsPost({
-    hostname: exotelSubdomain(),
-    path: `/v1/Accounts/${encodeURIComponent(accountSid)}/Sms/send.json`,
-    method: "POST",
-    auth: `${apiKey}:${apiToken}`,
-    headers: { "Content-Type": "application/x-www-form-urlencoded", "Content-Length": Buffer.byteLength(postData) }
-  }, postData);
-}
-
 async function sendPaymentSms(to, message, reference, baseUrl) {
-  if (exotelReady()) {
-    try {
-      const sent = await sendExotelSms(to, message, baseUrl);
-      const sms = sent.SMSMessage || sent.sms || sent;
-      return { sent: true, simulated: false, provider: "exotel", providerId: sms.Sid || sms.sid || "" };
-    } catch (err) {
-      console.error("Exotel SMS error:", err.message);
-    }
-  }
   if (twilioReady()) {
     try {
       const sent = await sendTwilioSms(to, message);
       return { sent: true, simulated: false, provider: "twilio", providerId: sent.sid };
     } catch (err) {
-      console.error("Twilio SMS error:", err.message);
+      console.error("[Twilio SMS error]", err.message);
     }
   }
   const simulated = recordSms(to, message, reference);
@@ -551,22 +826,25 @@ async function sendPaymentSms(to, message, reference, baseUrl) {
 
 async function createPaymentLink(session, req) {
   const reference = `CTB-${Math.floor(100000 + Math.random() * 900000)}`;
-  const amount = estimateFare(session);
-  const deadline = paymentDeadline(session);
-  const payment = {
+  const amount    = estimateFare(session);
+  const deadline  = paymentDeadline(session);
+  const payment   = {
     reference, amount, deadline, status: "pending",
-    route: `${session.from} to ${session.to}`,
-    date: session.date, departureTime: session.departureTime,
-    journeyType: session.journeyType, passenger: session.name, age: session.age
+    route:       `${session.from} to ${session.to}`,
+    date:         session.date,
+    departureTime: session.departureTime,
+    journeyType:   session.journeyType,
+    passenger:     session.name,
+    age:           session.age
   };
   payments.set(reference, payment);
   return { ...payment, url: `${getBaseUrl(req)}/pay/${reference}` };
 }
 
-// ─── LLM (GOOGLE GEMINI) ────────────────────────────────────────────────────
+// ─── LLM (GOOGLE GEMINI) ─────────────────────────────────────────────────────
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL   = "gemini-2.0-flash";
 
 function geminiReady() { return Boolean(GEMINI_API_KEY); }
 
@@ -613,55 +891,40 @@ Respond ONLY with a JSON object in this exact format (no extra text, no markdown
 The "slots" object should contain ALL slot values collected so far across the entire conversation (not just from the latest message). Leave a slot as "" if not yet known. Use the canonical station names (Delhi, Mumbai, Chennai, Bengaluru, Kolkata, Hyderabad, Pune, Ahmedabad, Jaipur, Lucknow). Use "Reserved" or "Unreserved" for journeyType.`;
 
 function buildSystemPrompt() {
-  const today = new Date();
+  const today   = new Date();
   const dateStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   return SYSTEM_PROMPT.replace("{{TODAY}}", dateStr);
 }
 
 async function callGemini(sessionId, userMessage) {
-  // Manage conversation history
-  if (!chatHistories.has(sessionId)) {
-    chatHistories.set(sessionId, []);
-  }
+  if (!chatHistories.has(sessionId)) chatHistories.set(sessionId, []);
   const history = chatHistories.get(sessionId);
   history.push({ role: "user", parts: [{ text: userMessage }] });
-
-  // Keep history manageable (last 20 turns)
   if (history.length > 40) history.splice(0, history.length - 40);
 
   const body = JSON.stringify({
     system_instruction: { parts: [{ text: buildSystemPrompt() }] },
     contents: history,
-    generationConfig: {
-      temperature: 0.3,
-      maxOutputTokens: 512
-    }
+    generationConfig: { temperature: 0.3, maxOutputTokens: 512 }
   });
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
+    const parsed = new URL(apiUrl);
     const req = https.request({
       hostname: parsed.hostname,
-      path: parsed.pathname + parsed.search,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body)
-      }
+      path:     parsed.pathname + parsed.search,
+      method:   "POST",
+      headers:  { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
     }, (res) => {
       let data = "";
       res.on("data", chunk => { data += chunk; });
       res.on("end", () => {
         try {
           const json = JSON.parse(data);
-          if (json.error) {
-            reject(new Error(json.error.message || JSON.stringify(json.error)));
-            return;
-          }
+          if (json.error) { reject(new Error(json.error.message || JSON.stringify(json.error))); return; }
           const text = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
-          // Add assistant response to history
           history.push({ role: "model", parts: [{ text }] });
           resolve(text);
         } catch (e) {
@@ -670,13 +933,15 @@ async function callGemini(sessionId, userMessage) {
       });
     });
     req.on("error", reject);
+    req.setTimeout(8000, () => {
+      req.destroy(new Error("Gemini request timed out"));
+    });
     req.write(body);
     req.end();
   });
 }
 
 function parseGeminiResponse(raw) {
-  // Strip markdown code fences if present
   let cleaned = raw.trim();
   if (cleaned.startsWith("```")) {
     cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
@@ -684,87 +949,82 @@ function parseGeminiResponse(raw) {
   try {
     const parsed = JSON.parse(cleaned);
     return {
-      reply: parsed.reply || "",
+      reply:     parsed.reply || "",
       slots: {
-        journeyType: parsed.slots?.journeyType || "",
-        from: parsed.slots?.from || "",
-        to: parsed.slots?.to || "",
-        date: parsed.slots?.date || "",
+        journeyType:   parsed.slots?.journeyType   || "",
+        from:          parsed.slots?.from          || "",
+        to:            parsed.slots?.to            || "",
+        date:          parsed.slots?.date          || "",
         departureTime: parsed.slots?.departureTime || "",
-        name: parsed.slots?.name || "",
-        age: parsed.slots?.age || ""
+        name:          parsed.slots?.name          || "",
+        age:           parsed.slots?.age           || ""
       },
       confirmed: Boolean(parsed.confirmed),
-      reset: Boolean(parsed.reset)
+      reset:     Boolean(parsed.reset)
     };
   } catch {
-    // If LLM didn't return valid JSON, return the text as reply
     return {
-      reply: raw.trim(),
-      slots: { journeyType: "", from: "", to: "", date: "", departureTime: "", name: "", age: "" },
+      reply:     raw.trim(),
+      slots:     { journeyType: "", from: "", to: "", date: "", departureTime: "", name: "", age: "" },
       confirmed: false,
-      reset: false
+      reset:     false
     };
   }
 }
 
-// ─── API HANDLERS ────────────────────────────────────────────────────────────
+// ─── API HANDLERS ─────────────────────────────────────────────────────────────
 
 async function handleApi(req, res, url) {
   // GET /api/call/config
   if (url.pathname === "/api/call/config" && req.method === "GET") {
     const provider = liveProvider();
     sendJson(res, 200, {
-      ready: provider !== "simulation",
+      ready:    provider !== "simulation",
       provider,
-      mode: provider === "simulation" ? "simulation" : "live",
-      callableNumber: activePhoneNumber(),
-      dummyTollFreeNumber: DUMMY_TOLL_FREE_NUMBER,
-      exotel: {
-        configured: exotelReady(),
-        exophone: EXOTEL_EXOPHONE,
-        trialNumber: EXOTEL_TRIAL_NUMBER,
-        appId: EXOTEL_APP_ID,
-        flowUrl: exotelReady() ? exotelFlowUrl() : "",
-        voicebotConfigUrl: `${getBaseUrl(req)}/exotel/voicebot-config`,
-        voicebotWsUrl: `${publicWsBaseUrl(req)}/exotel/voicebot`,
-        outboundStatusCallback: `${getBaseUrl(req)}/exotel/status`,
-        passthruUrl: `${getBaseUrl(req)}/exotel/passthru`
+      mode:     provider === "simulation" ? "simulation" : "live",
+      callableNumber:       activePhoneNumber(),
+      dummyTollFreeNumber:  DUMMY_TOLL_FREE_NUMBER,
+      twilio: {
+        configured:          twilioReady(),
+        fromNumber:          TWILIO_PHONE_NUMBER,
+        voicebotWsUrl:       `${publicWsBaseUrl(req)}/twilio/voicebot`,
+        outboundStatusCallback: `${getBaseUrl(req)}/twilio/status`,
+        inboundWebhook:      `${getBaseUrl(req)}/voice/incoming`
       },
-      publicBaseUrl: getBaseUrl(req),
-      inboundWebhook: `${getBaseUrl(req)}/voice/incoming`,
-      supportsSmsPaymentLinks: exotelReady() || twilioReady(),
+      publicBaseUrl:        getBaseUrl(req),
+      supportsSmsPaymentLinks: twilioReady(),
       supportsSimulatedSms: true,
-      simulatorEndpoint: "/api/simulate/call",
-      requiredEnv: {
-        exotel: ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOTEL_EXOPHONE", "EXOTEL_APP_ID", "PUBLIC_BASE_URL"],
-        twilio: ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "PUBLIC_BASE_URL"]
-      }
+      simulatorEndpoint:    "/api/simulate/call",
+      rapidApi: {
+        configured: Boolean(process.env.RAPIDAPI_KEY),
+        host: RAPIDAPI_HOST,
+        pathTemplate: RAPIDAPI_PATH_TEMPLATE
+      },
+      requiredEnv:          ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER", "PUBLIC_BASE_URL", "RAPIDAPI_KEY"]
     });
     return;
   }
 
   // POST /api/call/start
   if (url.pathname === "/api/call/start" && req.method === "POST") {
-    const body = JSON.parse((await readBody(req)) || "{}");
+    const body  = JSON.parse((await readBody(req)) || "{}");
     const toRaw = String(body.to || "").trim();
-    const to = toE164(toRaw) || toRaw;
+    const to    = toE164(toRaw) || toRaw;
     if (!/^\+[1-9]\d{7,14}$/.test(to)) {
       sendJson(res, 400, { ok: false, error: "Enter a valid phone number, e.g. +918897587467 or 8897587467." });
       return;
     }
     const provider = liveProvider();
     if (provider === "simulation") {
-      sendJson(res, 200, { ok: true, simulated: true, callSid: `SIM-${Date.now()}`, status: "simulated", message: `No live provider configured. Dummy number: ${DUMMY_TOLL_FREE_NUMBER}.` });
+      sendJson(res, 200, {
+        ok: true, simulated: true,
+        callSid:  `SIM-${Date.now()}`,
+        status:   "simulated",
+        message:  `No live provider configured. Dummy number: ${DUMMY_TOLL_FREE_NUMBER}.`
+      });
       return;
     }
     try {
-      if (provider === "exotel") {
-        const result = await startExotelCall(to, getBaseUrl(req));
-        const call = result.Call || result.call || result;
-        sendJson(res, 200, { ok: true, provider, callSid: call.Sid || call.sid || "", status: call.Status || call.status || "requested" });
-        return;
-      }
       const call = await startTwilioCall(to, getBaseUrl(req));
       sendJson(res, 200, { ok: true, provider, callSid: call.sid, status: call.status });
     } catch (err) {
@@ -775,10 +1035,14 @@ async function handleApi(req, res, url) {
 
   // POST /api/payment/create
   if (url.pathname === "/api/payment/create" && req.method === "POST") {
-    const body = JSON.parse((await readBody(req)) || "{}");
-    const session = { from: body.from, to: body.to, date: body.date, departureTime: body.departureTime, journeyType: body.journeyType, name: body.name, age: body.age };
-    if (!isComplete(session)) { sendJson(res, 400, { ok: false, error: "Missing booking details." }); return; }
-    if (!canStillPay(session)) { sendJson(res, 400, { ok: false, error: "Payment is closed — less than 15 minutes before departure." }); return; }
+    const body    = JSON.parse((await readBody(req)) || "{}");
+    const session = {
+      from: body.from, to: body.to, date: body.date,
+      departureTime: body.departureTime, journeyType: body.journeyType,
+      name: body.name, age: body.age
+    };
+    if (!isComplete(session))   { sendJson(res, 400, { ok: false, error: "Missing booking details." }); return; }
+    if (!canStillPay(session))  { sendJson(res, 400, { ok: false, error: "Payment is closed — less than 15 minutes before departure." }); return; }
     const payment = await createPaymentLink(session, req);
     sendJson(res, 200, { ok: true, payment });
     return;
@@ -798,26 +1062,30 @@ async function handleApi(req, res, url) {
 
   // POST /api/simulate/call
   if (url.pathname === "/api/simulate/call" && req.method === "POST") {
-    const body = JSON.parse((await readBody(req)) || "{}");
-    const from = String(body.from || "+919999999999");
+    const body    = JSON.parse((await readBody(req)) || "{}");
+    const from    = String(body.from || "+919999999999");
     const callSid = `SIM-CALL-${Date.now()}`;
     const session = getSession(callSid);
     session.phone = from;
-    const turns = Array.isArray(body.turns) ? body.turns : [String(body.speech || "")].filter(Boolean);
+    const turns   = Array.isArray(body.turns) ? body.turns : [String(body.speech || "")].filter(Boolean);
     const transcript = [];
     for (const turn of turns) {
       updateBooking(session, turn);
-      transcript.push({ caller: turn, bot: nextPrompt(session), session: { ...session } });
+      transcript.push({ caller: turn, bot: await nextPrompt(session), session: { ...session } });
     }
     let payment = null;
-    if (body.confirm === true && isComplete(session)) {
+    if (body.confirm === true && isComplete(session) && !needsTrainSelection(session)) {
       if (!canStillPay(session)) {
         transcript.push({ caller: "confirm", bot: "Payment is closed because less than 15 minutes remain before departure." });
       } else {
         payment = await createPaymentLink(session, req);
         const smsText = `Pay Rs ${payment.amount} for ticket ${payment.reference}: ${payment.url}. Pay before ${payment.deadline}.`;
         const sms = await sendPaymentSms(session.phone, smsText, payment.reference, getBaseUrl(req));
-        transcript.push({ caller: "confirm", bot: `Payment link sent${sms.simulated ? " to simulated SMS outbox" : " by SMS"}. Reference ${payment.reference}.`, payment, sms });
+        transcript.push({
+          caller: "confirm",
+          bot:    `Payment link sent${sms.simulated ? " to simulated SMS outbox" : " by SMS"}. Reference ${payment.reference}.`,
+          payment, sms
+        });
       }
     }
     sessions.delete(callSid);
@@ -833,75 +1101,88 @@ async function handleApi(req, res, url) {
 
   // POST /api/chat
   if (url.pathname === "/api/chat" && req.method === "POST") {
-    const body = JSON.parse((await readBody(req)) || "{}");
+    const body        = JSON.parse((await readBody(req)) || "{}");
     const userMessage = String(body.message || "").trim();
-    const sessionId = String(body.sessionId || `web-${Date.now()}`);
+    const sessionId   = String(body.sessionId || `web-${Date.now()}`);
 
     if (!userMessage) {
       sendJson(res, 400, { ok: false, error: "No message provided." });
       return;
     }
 
-    // ── LLM path ──
+    // LLM path
     if (geminiReady()) {
       try {
         const rawResponse = await callGemini(sessionId, userMessage);
-        const parsed = parseGeminiResponse(rawResponse);
+        const parsed      = parseGeminiResponse(rawResponse);
+        const session     = getSession(sessionId);
+        const s           = parsed.slots;
+        if (s.journeyType)   session.journeyType   = s.journeyType;
+        if (s.from)          session.from          = s.from;
+        if (s.to)            session.to            = s.to;
+        if (s.date)          session.date          = s.date;
+        if (s.departureTime) session.departureTime = s.departureTime;
+        if (s.name)          session.name          = s.name;
+        if (s.age)           session.age           = s.age;
+        updateBooking(session, userMessage);
 
         const result = {
           ok: true,
           llm: true,
           reply: parsed.reply,
-          slots: parsed.slots,
+          slots: {
+            journeyType:   session.journeyType   || "",
+            from:          session.from          || "",
+            to:            session.to            || "",
+            date:          session.date          || "",
+            departureTime: session.departureTime || "",
+            name:          session.name          || "",
+            age:           session.age           || ""
+          },
           confirmed: parsed.confirmed,
           reset: parsed.reset,
           payment: null
         };
 
-        // If LLM says reset, clear chat history
         if (parsed.reset) {
           chatHistories.delete(sessionId);
+          sessions.delete(sessionId);
         }
 
-        // If LLM says confirmed and all slots are filled, create payment link
         if (parsed.confirmed) {
-          const s = parsed.slots;
-          const session = {
-            from: s.from, to: s.to, date: s.date,
-            departureTime: s.departureTime, journeyType: s.journeyType,
-            name: s.name, age: s.age
-          };
-          if (isComplete(session)) {
+          if (isComplete(session) && !needsTrainSelection(session)) {
             if (canStillPay(session)) {
-              const payment = await createPaymentLink(session, req);
-              result.payment = payment;
+              result.payment = await createPaymentLink(session, req);
             } else {
-              result.reply += " However, payment is closed because less than 15 minutes remain before departure. Please choose another train.";
+              result.reply    += " However, payment is closed because less than 15 minutes remain before departure. Please choose another train.";
               result.confirmed = false;
             }
           } else {
             result.confirmed = false;
+            result.reply = await nextPrompt(session);
           }
+        } else if (!parsed.reset) {
+          result.reply = await nextPrompt(session);
         }
 
         sendJson(res, 200, result);
+        return;
       } catch (err) {
-        console.error("Gemini chat error:", err.message);
-        sendJson(res, 502, { ok: false, error: "LLM error: " + err.message, llm: true });
+        console.error("[Gemini chat error]", err.message);
+        // Fall through to the deterministic bot so setup still works if the
+        // Gemini key is missing quota, invalid, or temporarily unreachable.
       }
-      return;
     }
 
-    // ── Fallback: deterministic bot ──
+    // Deterministic fallback bot
     const session = getSession(sessionId);
-    const isReset = /\b(reset|cancel|start over|new ticket|dobara|shuru)\b/i.test(userMessage);
-    if (isReset) {
+    if (/\b(reset|cancel|start over|new ticket|dobara|shuru)\b/i.test(userMessage)) {
       sessions.delete(sessionId);
-      const freshSession = getSession(sessionId);
+      getSession(sessionId); // create fresh
       sendJson(res, 200, {
         ok: true, llm: false,
-        reply: "No problem, I have cleared the details. Please tell me your new journey.",
-        slots: { journeyType: "", from: "", to: "", date: "", departureTime: "", name: "", age: "" },
+        reply:     "No problem, I have cleared the details. Please tell me your new journey.",
+        slots:     { journeyType: "", from: "", to: "", date: "", departureTime: "", name: "", age: "" },
         confirmed: false, reset: true, payment: null
       });
       return;
@@ -911,26 +1192,28 @@ async function handleApi(req, res, url) {
 
     const isConfirm = /\b(confirm|yes|book it|go ahead|proceed|haan|theek|ok)\b/i.test(userMessage) && isComplete(session);
     let payment = null;
-    if (isConfirm) {
-      if (canStillPay(session)) {
-        payment = await createPaymentLink(session, req);
-      }
+    if (isConfirm && !needsTrainSelection(session) && canStillPay(session)) {
+      payment = await createPaymentLink(session, req);
     }
 
     sendJson(res, 200, {
       ok: true, llm: false,
-      reply: isConfirm && payment ? `Your payment link is ready. Reference number ${payment.reference}. Pay before ${payment.deadline}.` : nextPrompt(session),
+      reply: isConfirm && payment
+        ? `Your payment link is ready. Reference number ${payment.reference}. Pay before ${payment.deadline}.`
+        : isConfirm && needsTrainSelection(session)
+          ? await nextPrompt(session)
+        : await nextPrompt(session),
       slots: {
-        journeyType: session.journeyType || "",
-        from: session.from || "",
-        to: session.to || "",
-        date: session.date || "",
+        journeyType:   session.journeyType   || "",
+        from:          session.from          || "",
+        to:            session.to            || "",
+        date:          session.date          || "",
         departureTime: session.departureTime || "",
-        name: session.name || "",
-        age: session.age || ""
+        name:          session.name          || "",
+        age:           session.age           || ""
       },
       confirmed: Boolean(isConfirm && payment),
-      reset: false,
+      reset:     false,
       payment
     });
     return;
@@ -939,12 +1222,11 @@ async function handleApi(req, res, url) {
   sendJson(res, 404, { ok: false, error: "API route not found." });
 }
 
-// ─── VOICE HANDLERS (Twilio TwiML + Exotel ExoML + Gemini AI) ───────────────
+// ─── VOICE HANDLERS (Twilio TwiML + Gemini AI) ───────────────────────────────
 
-// Per-call Gemini conversation histories (callSid → messages[])
 const callHistories = new Map();
 
-async function callGeminiVoice(callSid, userSpeech, currentSession) {
+async function callGeminiVoice(callSid, userSpeech) {
   if (!callHistories.has(callSid)) callHistories.set(callSid, []);
   const history = callHistories.get(callSid);
   history.push({ role: "user", parts: [{ text: userSpeech }] });
@@ -952,19 +1234,19 @@ async function callGeminiVoice(callSid, userSpeech, currentSession) {
 
   const body = JSON.stringify({
     system_instruction: { parts: [{ text: buildSystemPrompt() }] },
-    contents: history,
-    generationConfig: { temperature: 0.3, maxOutputTokens: 256 }
+    contents:           history,
+    generationConfig:   { temperature: 0.3, maxOutputTokens: 256 }
   });
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   return new Promise((resolve, reject) => {
-    const parsed = new URL(url);
-    const req = https.request({
+    const parsed = new URL(apiUrl);
+    const req    = https.request({
       hostname: parsed.hostname,
-      path: parsed.pathname + parsed.search,
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
+      path:     parsed.pathname + parsed.search,
+      method:   "POST",
+      headers:  { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
     }, (r) => {
       let data = "";
       r.on("data", chunk => { data += chunk; });
@@ -979,96 +1261,78 @@ async function callGeminiVoice(callSid, userSpeech, currentSession) {
       });
     });
     req.on("error", reject);
+    req.setTimeout(8000, () => {
+      req.destroy(new Error("Gemini request timed out"));
+    });
     req.write(body);
     req.end();
   });
 }
 
 async function handleVoice(req, res, url) {
-  // Always use ExoML for Exotel; detect by user-agent or query param
-  const isExotel = true; // We are using Exotel exclusively
+  const base = getBaseUrl(req);
+  const renderGather = (message) => twimlGather(message, base);
+  const renderSay    = (message) => twimlSay(message);
 
-  const renderGather = (message) => exoml(message, req);
-  const renderSay    = (message) => exomlSay(message);
-
-  // ── GET or POST /voice/incoming — call starts ─────────────────────────────
+  // GET or POST /voice/incoming — call starts
   if (url.pathname === "/voice/incoming") {
+    let body = {};
+    if (req.method === "POST") {
+      body = querystring.parse(await readBody(req));
+    }
 
-  let body = {};
-  if (req.method === "POST") {
-    body = querystring.parse(await readBody(req));
+    const callSid = body.CallSid || body.callsid || body.CallId || `call-${Date.now()}`;
+    const session = getSession(callSid);
+
+    try {
+      session.phone = callerPhoneFromWebhook(body) || "";
+    } catch {
+      session.phone = "";
+    }
+
+    callHistories.delete(callSid);
+    console.log(`[Call incoming] callSid=${callSid} from=${session.phone}`);
+
+    send(res, 200, "text/xml; charset=utf-8",
+      renderGather("Hello! Welcome to the ticket booking service. You can speak naturally. Is your journey reserved or unreserved? You can also press 1 for reserved or 2 for unreserved."));
+    return;
   }
 
-  const callSid =
-    body.CallSid ||
-    body.callsid ||
-    body.CallId ||
-    `call-${Date.now()}`;
-
-  const session = getSession(callSid);
-
-  // 🔥 SAFE phone extraction (prevents crash)
-  try {
-    session.phone = callerPhoneFromWebhook(body) || "";
-  } catch (e) {
-    session.phone = "";
-  }
-
-  // Reset Gemini history
-  callHistories.delete(callSid);
-
-  console.log(`[Call incoming] callSid=${callSid} from=${session.phone}`);
-
-  const greeting =
-    "Hello! Welcome to the ticket booking service. You can speak naturally. Please tell me: is your journey reserved or unreserved?";
-
-  send(res, 200, "text/xml; charset=utf-8", renderGather(greeting));
-  return;
-}
-
-  // ── POST /voice/process — caller spoke or transcription arrived ───────────
+  // POST /voice/process — caller spoke or transcription arrived
   if (url.pathname === "/voice/process") {
-    const body = querystring.parse(await readBody(req));
-    console.log("BODY:", body);
-    const speech =
-  body.SpeechResult ||
-  body.speechResult ||
-  "";
+    const body    = querystring.parse(await readBody(req));
+    const speech  = extractSpeech(body);
     const callSid = body.CallSid || body.callsid || body.CallId || "local-call";
     const session = getSession(callSid);
-    console.log("----- VOICE DEBUG -----");
-    console.log("Speech:", speech);
-    console.log("Session BEFORE:", session);
-    
-    session.phone = callerPhoneFromWebhook(body) || session.phone;
 
     console.log(`[Call process] callSid=${callSid} speech="${speech}"`);
+    if (!speech) {
+      console.log(`[Call process empty] callSid=${callSid} keys=${Object.keys(body).join(",")} SpeechResult="${body.SpeechResult || ""}" Digits="${body.Digits || ""}"`);
+    }
+    session.phone = callerPhoneFromWebhook(body) || session.phone;
 
     // Empty speech — re-prompt
     if (!speech) {
-      const prompt = nextPrompt(session) || "Please tell me your journey details.";
-send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
+      const prompt = await nextPrompt(session) || "Please tell me your journey details.";
+      send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
       return;
     }
 
-    // ── Try Gemini AI first ────────────────────────────────────────────────
+    // Try Gemini AI first
     if (geminiReady()) {
       try {
-        const parsed = await callGeminiVoice(callSid, speech, session);
-
-        // Merge Gemini slots into session
-        const s = parsed.slots;
-        if (s.journeyType) session.journeyType = s.journeyType;
-        if (s.from)        session.from        = s.from;
-        if (s.to)          session.to          = s.to;
-        if (s.date)        session.date        = s.date;
+        const parsed = await callGeminiVoice(callSid, speech);
+        const s      = parsed.slots;
+        if (s.journeyType)   session.journeyType   = s.journeyType;
+        if (s.from)          session.from          = s.from;
+        if (s.to)            session.to            = s.to;
+        if (s.date)          session.date          = s.date;
         if (s.departureTime) session.departureTime = s.departureTime;
-        if (s.name)        session.name        = s.name;
-        if (s.age)         session.age         = s.age;
+        if (s.name)          session.name          = s.name;
+        if (s.age)           session.age           = s.age;
 
         updateBooking(session, speech);
 
-        // Reset
         if (parsed.reset) {
           sessions.delete(callSid);
           callHistories.delete(callSid);
@@ -1077,8 +1341,7 @@ send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
           return;
         }
 
-        // Confirmed + all slots filled → create payment
-        if (parsed.confirmed && isComplete(session)) {
+        if (parsed.confirmed && isComplete(session) && !needsTrainSelection(session)) {
           if (!canStillPay(session)) {
             sessions.delete(callSid);
             callHistories.delete(callSid);
@@ -1093,30 +1356,30 @@ send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
             try {
               const sms = await sendPaymentSms(session.phone, smsText, payment.reference, getBaseUrl(req));
               smsSent = true; simulated = sms.simulated;
-            } catch (err) { console.error("SMS error:", err.message); }
+            } catch (err) { console.error("[SMS error]", err.message); }
           }
           sessions.delete(callSid);
           callHistories.delete(callSid);
           const smsMsg = smsSent && !simulated
             ? "I have sent the payment link to your phone by SMS."
-            : "Your payment link is ready. Please check your SMS."
+            : "Your payment link is ready. Please check your SMS.";
           send(res, 200, "text/xml; charset=utf-8",
             renderSay(`${smsMsg} Your reference number is ${payment.reference}. Please pay before ${payment.deadline}. Thank you for calling.`));
           return;
         }
 
-        // Otherwise speak Gemini's reply
-        const replyText = parsed.reply || nextPrompt(session);
+        const replyText = (parsed.confirmed || needsTrainSelection(session))
+          ? await nextPrompt(session)
+          : parsed.reply || await nextPrompt(session);
         send(res, 200, "text/xml; charset=utf-8", renderGather(replyText));
         return;
-
       } catch (err) {
         console.error("[Gemini voice error]", err.message);
         // Fall through to deterministic bot
       }
     }
 
-    // ── Deterministic fallback ────────────────────────────────────────────
+    // Deterministic fallback
     if (/\b(reset|cancel|start over|new ticket|dobara|shuru)\b/i.test(speech)) {
       sessions.delete(callSid);
       send(res, 200, "text/xml; charset=utf-8",
@@ -1127,11 +1390,14 @@ send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
     updateBooking(session, speech);
 
     if (/\b(confirm|yes|book|proceed|done|go ahead|haan|theek|ok)\b/i.test(speech)) {
-  if (!isComplete(session)) {
-    send(res, 200, "text/xml; charset=utf-8",
-      renderGather("Please provide all details before confirming."));
-    return;
-  }
+      if (needsTrainSelection(session)) {
+        send(res, 200, "text/xml; charset=utf-8", renderGather(await nextPrompt(session)));
+        return;
+      }
+      if (!isComplete(session)) {
+        send(res, 200, "text/xml; charset=utf-8", renderGather("Please provide all details before confirming."));
+        return;
+      }
       if (!canStillPay(session)) {
         sessions.delete(callSid);
         send(res, 200, "text/xml; charset=utf-8",
@@ -1145,77 +1411,50 @@ send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
         try {
           const sms = await sendPaymentSms(session.phone, smsText, payment.reference, getBaseUrl(req));
           smsSent = true; simulated = sms.simulated;
-        } catch (err) { console.error("SMS error:", err.message); }
+        } catch (err) { console.error("[SMS error]", err.message); }
       }
       sessions.delete(callSid);
       const smsStatus = smsSent && !simulated
         ? "The payment link has been sent to your phone by SMS."
-        : "A payment link has been created. Reference: " + payment.reference;
+        : `A payment link has been created. Reference: ${payment.reference}`;
       send(res, 200, "text/xml; charset=utf-8",
         renderSay(`${smsStatus} Please pay before ${payment.deadline}. Thank you for calling.`));
       return;
     }
 
-    send(res, 200, "text/xml; charset=utf-8", renderGather(nextPrompt(session)));
+    const prompt = await nextPrompt(session);
+    send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
     return;
   }
 
   send(res, 404, "text/plain", "Voice route not found.");
 }
 
-// ─── EXOTEL HANDLERS ─────────────────────────────────────────────────────────
+// ─── TWILIO STATUS HANDLER ────────────────────────────────────────────────────
 
-async function handleExotel(req, res, url) {
-  // Voicebot config — returns WS URL for the Exotel Voicebot applet
-  if (url.pathname === "/exotel/voicebot-config") {
-    sendJson(res, 200, {
-      ws_url: `${publicWsBaseUrl(req)}/exotel/voicebot`,
-      websocket_url: `${publicWsBaseUrl(req)}/exotel/voicebot`,
-      status_callback: `${getBaseUrl(req)}/exotel/status`
-    });
-    return;
-  }
-
-  // Status / passthru / sms-status — log and acknowledge
+async function handleTwilio(req, res, url) {
   const params = req.method === "GET"
     ? Object.fromEntries(url.searchParams.entries())
     : querystring.parse(await readBody(req));
 
   const event = {
     receivedAt: new Date().toISOString(),
-    route: url.pathname,
-    callSid: params.CallSid || params.callsid || "",
-    from: params.CallFrom || params.From || params.from || "",
-    to: params.CallTo || params.To || params.to || "",
-    status: params.CallStatus || params.Status || params.status || "",
-    direction: params.Direction || params.direction || "",
-    raw: params
+    route:      url.pathname,
+    callSid:    params.CallSid  || params.callsid  || "",
+    messageSid: params.MessageSid || "",
+    from:       params.From     || params.from     || "",
+    to:         params.To       || params.to       || "",
+    status:     params.CallStatus || params.MessageStatus || params.Status || "",
+    direction:  params.Direction  || params.direction || "",
+    raw:        params
   };
 
-  console.log(`[Exotel] ${url.pathname}:`, JSON.stringify(event));
+  console.log(`[Twilio] ${url.pathname}:`, JSON.stringify(event));
   voicebotEvents.push(event);
   sendJson(res, 200, { ok: true, event });
 }
 
-// ─── WEBSOCKET VOICEBOT (Exotel Voicebot / AgentStream) ─────────────────────
-//
-// This implements a text-based conversational bot over the Exotel Voicebot
-// websocket protocol. Exotel sends JSON frames; we reply with JSON frames.
-//
-// Protocol summary (Exotel Voicebot):
-//   → { event: "start",  callSid, from, to, ... }
-//   → { event: "media",  payload: "<base64-mulaw-audio>" }   (if audio streaming)
-//   → { event: "dtmf",   digit }
-//   → { event: "speech", text: "..." }   (if ASR is enabled on Exotel side)
-//   → { event: "stop" }
-//
-//   ← { event: "playback", text: "..." }  — ask Exotel TTS to speak
-//   ← { event: "mark",     name: "..." }  — synchronisation marker
-//   ← { event: "stop" }                   — hang up
-//
-// If Exotel sends raw speech text via the "speech" event, we can do full
-// conversational booking without any additional AI model.
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── WEBSOCKET VOICEBOT (Twilio Media Streams compatible) ────────────────────
 
 function websocketAcceptKey(key) {
   return crypto
@@ -1224,10 +1463,9 @@ function websocketAcceptKey(key) {
     .digest("base64");
 }
 
-// Build a WebSocket text frame (FIN + opcode 0x1)
 function wsFrame(text) {
   const payload = Buffer.from(text, "utf8");
-  const len = payload.length;
+  const len     = payload.length;
   let header;
   if (len < 126) {
     header = Buffer.from([0x81, len]);
@@ -1241,26 +1479,25 @@ function wsFrame(text) {
   return Buffer.concat([header, payload]);
 }
 
-// Decode incoming WebSocket frames (handles masking)
 function parseWsFrames(buffer) {
   const frames = [];
-  let offset = 0;
+  let offset   = 0;
   while (offset + 2 <= buffer.length) {
-    const b0 = buffer[offset];
-    const b1 = buffer[offset + 1];
-    const opcode = b0 & 0x0f;
-    const masked = (b1 & 0x80) !== 0;
+    const b0      = buffer[offset];
+    const b1      = buffer[offset + 1];
+    const opcode  = b0 & 0x0f;
+    const masked  = (b1 & 0x80) !== 0;
     let payloadLen = b1 & 0x7f;
-    let headerLen = 2;
+    let headerLen  = 2;
 
     if (payloadLen === 126) {
       if (offset + 4 > buffer.length) break;
       payloadLen = buffer.readUInt16BE(offset + 2);
-      headerLen = 4;
+      headerLen  = 4;
     } else if (payloadLen === 127) {
       if (offset + 10 > buffer.length) break;
       payloadLen = Number(buffer.readBigUInt64BE(offset + 2));
-      headerLen = 10;
+      headerLen  = 10;
     }
 
     const maskOffset = offset + headerLen;
@@ -1284,7 +1521,6 @@ function handleVoicebotSocket(req, socket) {
   const key = req.headers["sec-websocket-key"];
   if (!key) { socket.destroy(); return; }
 
-  // Complete the WebSocket handshake
   socket.write([
     "HTTP/1.1 101 Switching Protocols",
     "Upgrade: websocket",
@@ -1293,7 +1529,6 @@ function handleVoicebotSocket(req, socket) {
     "", ""
   ].join("\r\n"));
 
-  // Per-call state
   let callSid = `WS-${Date.now()}`;
   let session = getSession(callSid);
 
@@ -1303,7 +1538,6 @@ function handleVoicebotSocket(req, socket) {
 
   const speak = (text) => {
     console.log(`[Voicebot → caller] "${text}"`);
-    // Exotel Voicebot TTS playback event
     sendJson_({ event: "playback", text, language: "en-IN" });
   };
 
@@ -1312,7 +1546,6 @@ function handleVoicebotSocket(req, socket) {
     console.log(`[Voicebot ← caller] "${text}"`);
     voicebotEvents.push({ receivedAt: new Date().toISOString(), callSid, speech: text });
 
-    // Reset
     if (/\b(reset|cancel|start over|new ticket|dobara|shuru)\b/i.test(text)) {
       sessions.delete(callSid);
       callSid = `WS-${Date.now()}`;
@@ -1323,34 +1556,34 @@ function handleVoicebotSocket(req, socket) {
 
     updateBooking(session, text);
 
-    // Confirm
-    if (/\b(confirm|yes|book it|go ahead|proceed|haan|theek hai|ok)\b/i.test(text) && isComplete(session)) {
+    if (/\b(confirm|yes|book it|go ahead|proceed|haan|theek hai|ok)\b/i.test(text) && isComplete(session) && !needsTrainSelection(session)) {
       if (!canStillPay(session)) {
         speak("Sorry, payment is now closed because less than 15 minutes remain before departure. Please call again for a different train. Goodbye.");
         sendJson_({ event: "stop" });
         sessions.delete(callSid);
         return;
       }
-      const payment = await createPaymentLink(session, req);
+      const payment = await createPaymentLink(session, { headers: req.headers });
       const smsText = `Pay Rs ${payment.amount} for ticket ${payment.reference}: ${payment.url}. Pay before ${payment.deadline}.`;
       let smsSent = false, simulated = false;
       if (session.phone) {
         try {
           const sms = await sendPaymentSms(session.phone, smsText, payment.reference, getBaseUrl(req));
           smsSent = true; simulated = sms.simulated;
-        } catch (err) { console.error("SMS error:", err.message); }
+        } catch (err) { console.error("[SMS error]", err.message); }
       }
-      const smsMsg = smsSent && !simulated ? "I have sent the payment link to your phone by SMS." : "Your payment link is ready.";
+      const smsMsg = smsSent && !simulated
+        ? "I have sent the payment link to your phone by SMS."
+        : "Your payment link is ready.";
       speak(`${smsMsg} Your reference number is ${payment.reference}. Please pay before ${payment.deadline}. Thank you for calling.`);
       sendJson_({ event: "stop" });
       sessions.delete(callSid);
       return;
     }
 
-    speak(nextPrompt(session));
+    speak(await nextPrompt(session));
   };
 
-  // Greet immediately on connect
   voicebotEvents.push({ connectedAt: new Date().toISOString(), callSid, remoteAddress: socket.remoteAddress });
   speak("Hello! Welcome to the ticket booking service. Is your journey reserved or unreserved?");
 
@@ -1359,41 +1592,26 @@ function handleVoicebotSocket(req, socket) {
   socket.on("data", (chunk) => {
     buf = Buffer.concat([buf, chunk]);
     const frames = parseWsFrames(buf);
-    // Consume parsed bytes
-    let consumed = 0;
-    for (const frame of frames) {
-      // Compute frame byte length to advance buf (re-parse header)
-      consumed = buf.length; // simple: just reset after each batch
-    }
-    buf = Buffer.alloc(0); // reset accumulator after processing
+    buf = Buffer.alloc(0);
 
     for (const frame of frames) {
-      if (frame.opcode === 0x8) { // close
-        socket.destroy();
-        return;
-      }
-      if (frame.opcode === 0x9) { // ping → pong
-        socket.write(wsFrame("pong")); // simplified
-        continue;
-      }
-      if (frame.opcode === 0x1 || frame.opcode === 0x2) { // text or binary
+      if (frame.opcode === 0x8) { socket.destroy(); return; }
+      if (frame.opcode === 0x9) { socket.write(wsFrame("pong")); continue; }
+      if (frame.opcode === 0x1 || frame.opcode === 0x2) {
         let msg;
         try { msg = JSON.parse(frame.data.toString("utf8")); } catch { continue; }
-
         voicebotEvents.push({ receivedAt: new Date().toISOString(), event: msg.event || "unknown", callSid });
 
         if (msg.event === "start") {
-          callSid = msg.callSid || msg.call_sid || callSid;
-          session = getSession(callSid);
+          callSid      = msg.callSid || msg.call_sid || callSid;
+          session      = getSession(callSid);
           session.phone = msg.from || msg.From || session.phone || "";
           console.log(`[Voicebot start] callSid=${callSid} from=${session.phone}`);
         } else if (msg.event === "speech" && msg.text) {
           handleSpeech(msg.text).catch(console.error);
         } else if (msg.event === "dtmf" && msg.digit) {
-          // Map DTMF to common answers for accessibility
           const dtmfMap = { "1": "reserved", "2": "unreserved", "9": "confirm", "0": "cancel" };
-          const mapped = dtmfMap[String(msg.digit)] || msg.digit;
-          handleSpeech(mapped).catch(console.error);
+          handleSpeech(dtmfMap[String(msg.digit)] || msg.digit).catch(console.error);
         } else if (msg.event === "stop") {
           sessions.delete(callSid);
           socket.destroy();
@@ -1412,7 +1630,7 @@ function handleVoicebotSocket(req, socket) {
   });
 }
 
-// ─── PAYMENT PAGE ────────────────────────────────────────────────────────────
+// ─── PAYMENT PAGE ─────────────────────────────────────────────────────────────
 
 function servePaymentPage(res, reference) {
   const payment = payments.get(reference);
@@ -1420,9 +1638,11 @@ function servePaymentPage(res, reference) {
     send(res, 404, "text/html; charset=utf-8", "<h1>Payment link not found</h1>");
     return;
   }
-  const expired = new Date() > new Date(payment.deadline.replace(" ", "T"));
+  const expired     = new Date() > new Date(payment.deadline.replace(" ", "T"));
   const disabledAttr = expired ? "disabled" : "";
-  const statusNote = expired ? "<p style='color:#ba2e4a;font-weight:700'>⚠ Payment window has closed for this departure.</p>" : "";
+  const statusNote  = expired
+    ? "<p style='color:#ba2e4a;font-weight:700'>⚠ Payment window has closed for this departure.</p>"
+    : "";
   send(res, 200, "text/html; charset=utf-8", `<!doctype html>
 <html lang="en">
 <head>
@@ -1471,24 +1691,27 @@ function servePaymentPage(res, reference) {
 </html>`);
 }
 
-// ─── HTTP SERVER ─────────────────────────────────────────────────────────────
+// ─── HTTP SERVER ──────────────────────────────────────────────────────────────
 
 const server = http.createServer(async (req, res) => {
-  console.log("REQUEST HIT:", req.method, req.url);
+  console.log("REQUEST:", req.method, req.url);
   try {
-    // Handle CORS preflight
     if (req.method === "OPTIONS") {
-      res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET,POST", "Access-Control-Allow-Headers": "Content-Type" });
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin":  "*",
+        "Access-Control-Allow-Methods": "GET,POST",
+        "Access-Control-Allow-Headers": "Content-Type"
+      });
       res.end();
       return;
     }
 
     const url = new URL(req.url, getBaseUrl(req));
 
-    if (url.pathname.startsWith("/api/")) { await handleApi(req, res, url); return; }
-    if (url.pathname.startsWith("/voice/")) { await handleVoice(req, res, url); return; }
-    if (url.pathname.startsWith("/exotel/")) { await handleExotel(req, res, url); return; }
-    if (url.pathname.startsWith("/pay/")) { servePaymentPage(res, decodeURIComponent(url.pathname.slice(5))); return; }
+    if (url.pathname.startsWith("/api/"))    { await handleApi(req, res, url);    return; }
+    if (url.pathname.startsWith("/voice/"))  { await handleVoice(req, res, url);  return; }
+    if (url.pathname.startsWith("/twilio/")) { await handleTwilio(req, res, url); return; }
+    if (url.pathname.startsWith("/pay/"))    { servePaymentPage(res, decodeURIComponent(url.pathname.slice(5))); return; }
     serveStatic(req, res);
   } catch (err) {
     console.error(err);
@@ -1496,10 +1719,10 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// WebSocket upgrade (Exotel Voicebot)
+// WebSocket upgrade (Twilio Media Streams / Voicebot)
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url, getBaseUrl(req));
-  if (url.pathname === "/exotel/voicebot") {
+  if (url.pathname === "/twilio/voicebot") {
     handleVoicebotSocket(req, socket);
     return;
   }
@@ -1510,15 +1733,19 @@ server.listen(PORT, "0.0.0.0", () => {
   const displayUrl = PUBLIC_BASE_URL || `http://localhost:${PORT} (auto-detects ngrok/tunnel from Host header)`;
   console.log("─────────────────────────────────────────────────────────");
   console.log(`✅  Call Ticket app running at http://localhost:${PORT}`);
-  console.log(`📱  ExoPhone: ${EXOTEL_EXOPHONE} (trial: ${EXOTEL_TRIAL_NUMBER})`);
+  console.log(`📱  Twilio number: ${activePhoneNumber()}`);
   console.log(`🌐  Public URL: ${displayUrl}`);
-  console.log(`📞  Inbound webhook:  https://bobcat-relock-imprison.ngrok-free.dev/voice/incoming`);
-  console.log(`🤖  Voicebot WS:     https://bobcat-relock-imprison.ngrok-free.dev/exotel/voicebot`);
-  console.log(`🔧  Voicebot config: https://bobcat-relock-imprison.ngrok-free.dev/exotel/voicebot-config`);
-  console.log(`📊  Provider: ${liveProvider()} | Exotel ready: ${exotelReady()}`);
+  console.log(`📞  Inbound webhook:  ${displayUrl}/voice/incoming`);
+  console.log(`🤖  Voicebot WS:      ${displayUrl.replace("https://", "wss://").replace("http://", "ws://")}/twilio/voicebot`);
+  console.log(`📊  Provider: ${liveProvider()} | Twilio ready: ${twilioReady()}`);
+  if (!geminiReady()) {
+    console.warn("WARNING: GEMINI_API_KEY not set - voice bot will use deterministic fallback only.");
+  }
+  if (!process.env.RAPIDAPI_KEY) {
+    console.warn("WARNING: RAPIDAPI_KEY not set - train lookup will use placeholder trains.");
+  }
   if (!PUBLIC_BASE_URL) {
     console.log(`⚡  TIP: Set PUBLIC_BASE_URL=https://your-ngrok-url.ngrok-free.app in .env`);
-    console.log(`         or the server will auto-detect it from each incoming request.`);
   }
   console.log("─────────────────────────────────────────────────────────");
 });

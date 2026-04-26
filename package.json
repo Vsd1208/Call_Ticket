@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js && node --check app.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2",
+    "twilio": "^6.0.0"
+  }
+}

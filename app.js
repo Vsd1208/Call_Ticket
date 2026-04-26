@@ -142,10 +142,15 @@ function parseDate(t) {
   const today=new Date();
   if(/\btoday\b|आज/.test(t)) return fmtDate(today);
   if(/\btomorrow\b|कल/.test(t)){ const d=new Date(today); d.setDate(d.getDate()+1); return fmtDate(d); }
+  const months={jan:"01",january:"01",feb:"02",february:"02",mar:"03",march:"03",apr:"04",april:"04",may:"05",jun:"06",june:"06",jul:"07",july:"07",aug:"08",august:"08",sep:"09",sept:"09",september:"09",oct:"10",october:"10",nov:"11",november:"11",dec:"12",december:"12"};
+  const valid=(d,m,y)=>{const dt=new Date(Number(y),Number(m)-1,Number(d));return dt.getFullYear()===Number(y)&&dt.getMonth()===Number(m)-1&&dt.getDate()===Number(d);};
+  const yr=y=>/^\d{2}$/.test(String(y))?`20${y}`:String(y);
   const iso=t.match(/\b(20\d{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b/);
   if(iso) return `${iso[1]}-${iso[2].padStart(2,"0")}-${iso[3].padStart(2,"0")}`;
-  const ind=t.match(/\b(0?[1-9]|[12]\d|3[01])[-/](0?[1-9]|1[0-2])[-/](20\d{2})\b/);
-  if(ind) return `${ind[3]}-${ind[2].padStart(2,"0")}-${ind[1].padStart(2,"0")}`;
+  const ind=t.match(/\b(0?[1-9]|[12]\d|3[01])[-/\s](0?[1-9]|1[0-2])[-/\s](20\d{2}|\d{2})\b/);
+  if(ind){const y=yr(ind[3]);if(valid(ind[1],ind[2],y))return `${y}-${ind[2].padStart(2,"0")}-${ind[1].padStart(2,"0")}`;}
+  const named=t.match(/\b(0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?\s+([a-z]+)\s+(20\d{2}|\d{2})\b/i);
+  if(named&&months[named[2].toLowerCase()]){const y=yr(named[3]),m=months[named[2].toLowerCase()];if(valid(named[1],m,y))return `${y}-${m}-${named[1].padStart(2,"0")}`;}
   return "";
 }
 function fmtDate(d) { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
