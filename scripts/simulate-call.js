@@ -5,6 +5,7 @@ const payload = JSON.stringify({
   confirm: true,
   turns: [
     "reserved journey",
+    "sleeper class",
     "from Delhi to Mumbai on 2026-12-01 at 10:30 for Rahul age 28 window seat"
   ]
 });

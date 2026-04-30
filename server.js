@@ -247,11 +247,26 @@ function parseAge(text) {
 }
 
 function parseSeat(text) {
+  if (/\b(any|no preference|no specific|koi bhi|koibhi)\b/i.test(text)) return "Any";
   if (/\bwindow\b/i.test(text)) return "Window";
   if (/\baisle\b/i.test(text))  return "Aisle";
   if (/\blower\b/i.test(text))  return "Lower";
   if (/\bupper\b/i.test(text))  return "Upper";
   if (/\bmiddle\b/i.test(text)) return "Middle";
+  return "";
+}
+
+function parseTravelClass(text) {
+  const source = String(text || "").toLowerCase();
+  if (/\b(first ac|1a|first a c|ac first|a c first)\b/i.test(source)) return "First AC";
+  if (/\b(second ac|2a|2 ac|two ac|a c two|ac 2 tier|2 tier ac|second a c)\b/i.test(source)) return "AC 2 Tier";
+  if (/\b(third ac|3a|3 ac|three ac|a c three|ac 3 tier|3 tier ac|third a c)\b/i.test(source)) return "AC 3 Tier";
+  if (/\b(ac chair car|cc|chair car|a c chair car)\b/i.test(source)) return "AC Chair Car";
+  if (/\b(sleeper|sl)\b/i.test(source)) return "Sleeper";
+  if (/\b(second sitting|2s|second seater|sitting)\b/i.test(source)) return "Second Sitting";
+  if (/\b(first class|fc)\b/i.test(source)) return "First Class";
+  if (/\b(general|unreserved|ordinary)\b/i.test(source)) return "General";
+  if (/\b(second class)\b/i.test(source)) return "Second Class";
   return "";
 }
 
@@ -323,18 +338,21 @@ function updateBooking(session, rawText) {
   const name    = parseName(rawText) || (!session.name && session.from && session.to && session.date ? parseDirectName(rawText) : "");
   const age     = parseAge(rawText);
   const seat    = parseSeat(rawText);
+  const tclass  = parseTravelClass(rawText);
   const jt      = parseJourneyType(rawText);
   const depTime = parseDepartureTime(rawText);
   if (date)    session.date          = date;
   if (name)    session.name          = name;
   if (age)     session.age           = age;
   if (seat)    session.seat          = seat;
+  if (tclass)  session.travelClass   = tclass;
   if (jt)      session.journeyType   = jt;
   if (depTime) session.departureTime = depTime;
 
   if (session.from !== oldFrom || session.to !== oldTo) {
     session.trainOptions = [];
     session.trainSelected = "";
+    session.endCall = false;
   }
 }
 
@@ -344,7 +362,7 @@ const STATION_CODE_MAP = {
   chennai:   "MAS",
   hyderabad: "HYB",
   delhi:     "NDLS",
-  mumbai:    "CST",
+  mumbai:    "BVI",
   bangalore: "SBC",
   bengaluru: "SBC",
   kolkata:   "HWH",
@@ -360,14 +378,17 @@ function normalizeCity(name) {
 
 // ─── TRAINS BETWEEN STATIONS (RapidAPI) ──────────────────────────────────────
 
-const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST || "trains.p.rapidapi.com";
+const RAPIDAPI_HOST = process.env.RAPIDAPI_HOST || "irctc1.p.rapidapi.com";
 const RAPIDAPI_PATH_TEMPLATE =
-  process.env.RAPIDAPI_PATH_TEMPLATE || "/v1/railways/trains/{from}/{to}";
+  process.env.RAPIDAPI_PATH_TEMPLATE || "/api/v3/trainBetweenStations?fromStationCode={from}&toStationCode={to}";
 
-function rapidApiPath(fromCode, toCode) {
+function rapidApiPath(fromCode, toCode, date) {
   return RAPIDAPI_PATH_TEMPLATE
     .replaceAll("{from}", encodeURIComponent(fromCode))
-    .replaceAll("{to}", encodeURIComponent(toCode));
+    .replaceAll("{station}", encodeURIComponent(fromCode))
+    .replaceAll("{stationCode}", encodeURIComponent(fromCode))
+    .replaceAll("{to}", encodeURIComponent(toCode))
+    .replaceAll("{date}", encodeURIComponent(date || ""));
 }
 
 function firstValue(obj, keys) {
@@ -387,7 +408,10 @@ function findTrainArray(value, depth = 0) {
     if (
       value.some(item =>
         item && typeof item === "object" &&
-        firstValue(item, ["train_name", "trainName", "name", "train_number", "trainNumber", "number"])
+        firstValue(item, [
+          "train_name", "trainName", "TrainName", "name", "Name",
+          "train_number", "trainNumber", "TrainNo", "number", "Number"
+        ])
       )
     ) {
       return value;
@@ -412,12 +436,20 @@ function findTrainArray(value, depth = 0) {
 }
 
 function normalizeTrain(raw, index) {
-  const number = raw.train_number || raw.trainNumber || raw.number || "";
+  const number =
+    raw.train_number ||
+    raw.trainNumber ||
+    raw.TrainNo ||
+    raw.number ||
+    raw.Number ||
+    "";
 
   const name =
     raw.train_name ||
     raw.trainName ||
+    raw.TrainName ||
     raw.name ||
+    raw.Name ||
     (number ? `Train ${number}` : `Train option ${index + 1}`);
 
   // 🎯 IRCTC uses "from_std" for departure time
@@ -425,7 +457,11 @@ function normalizeTrain(raw, index) {
     raw.from_std ||
     raw.departure_time ||
     raw.departureTime ||
+    raw.DepartureTime ||
+    raw.ScheduleDeparture ||
+    raw.ExpectedDeparture ||
     raw.start_time ||
+    raw.StartTime ||
     "--:--";
 
   return {
@@ -435,7 +471,7 @@ function normalizeTrain(raw, index) {
   };
 }
 
-async function getTrains(from, to) {
+async function getTrains(from, to, date) {
   const fromCode = normalizeCity(from);
   const toCode   = normalizeCity(to);
 
@@ -456,9 +492,10 @@ async function getTrains(from, to) {
   return new Promise((resolve) => {
     const options = {
       hostname: RAPIDAPI_HOST,
-      path: rapidApiPath(fromCode, toCode),
+      path: rapidApiPath(fromCode, toCode, date),
       method: "GET",
       headers: {
+        "Content-Type": "application/json",
         "x-rapidapi-key":  RAPIDAPI_KEY,
         "x-rapidapi-host": RAPIDAPI_HOST
       }
@@ -471,6 +508,10 @@ async function getTrains(from, to) {
         try {
           if (res.statusCode < 200 || res.statusCode >= 300) {
             console.error(`[RapidAPI] HTTP ${res.statusCode}: ${body.slice(0, 300)}`);
+            if (res.statusCode === 429) {
+              resolve([{ name: "Train service quota exceeded", time: "" }]);
+              return;
+            }
             resolve([{ name: "Error fetching trains", time: "" }]);
             return;
           }
@@ -507,7 +548,7 @@ function trainOptionLabel(train) {
 }
 
 function isPlaceholderTrain(train) {
-  return /^(invalid stations|no trains found|error fetching trains)$/i.test(train.name || "");
+  return /^(invalid stations|no trains found|error fetching trains|train service quota exceeded)$/i.test(train.name || "");
 }
 
 function applyTrainSelection(session, rawText) {
@@ -550,11 +591,13 @@ function getSession(callSid) {
       departureTime: "",
       name: "",
       age: "",
-      seat: "Any",
+      travelClass: "",
+      seat: "",
       journeyType: "",
       phone: "",
       trainOptions: [],
-      trainSelected: ""
+      trainSelected: "",
+      endCall: false
     });
   }
   return sessions.get(key);
@@ -568,7 +611,9 @@ function isComplete(session) {
     session.date &&
     session.departureTime &&
     session.name &&
-    session.age
+    session.age &&
+    session.travelClass &&
+    session.seat
   );
 }
 
@@ -576,6 +621,9 @@ function isComplete(session) {
 
 async function nextPrompt(session) {
   if (!session.journeyType)  return "Is this journey reserved or unreserved? You can say it, or press 1 for reserved and 2 for unreserved.";
+  if (!session.travelClass)  return session.journeyType === "Unreserved"
+    ? "What class would you like? Say general or second sitting. You can also press 1 for general or 2 for second sitting."
+    : "What class would you like? Say sleeper, AC chair car, 3 AC, 2 AC, first AC, first class, or second sitting. You can also press 1 for sleeper, 2 for chair car, 3 for 3 AC, 4 for 2 AC, 5 for first AC.";
   if (!session.from)         return "Which station are you starting from?";
   if (!session.to)           return "Which station are you going to?";
   if (!session.date)         return "What is your travel date?";
@@ -583,10 +631,17 @@ async function nextPrompt(session) {
   // Train selection
   if (!session.trainSelected) {
     if (!session.trainOptions || session.trainOptions.length === 0) {
-      const trains = await getTrains(session.from, session.to);
+      const trains = await getTrains(session.from, session.to, session.date);
       session.trainOptions = trains;
       if (trains.every(isPlaceholderTrain)) {
-        return `${trains[0].name}. Please tell me the train departure time.`;
+        session.endCall = true;
+        if (/^no trains found$/i.test(trains[0].name || "")) {
+          return `Sorry, I could not find any trains from ${session.from} to ${session.to} on ${session.date}. Please call again with a different station or date. Goodbye.`;
+        }
+        if (/^train service quota exceeded$/i.test(trains[0].name || "")) {
+          return "Sorry, the train lookup service quota is exhausted right now. Please try again after upgrading or renewing the RapidAPI plan. Goodbye.";
+        }
+        return `Sorry, I could not complete the train lookup for ${session.from} to ${session.to} on ${session.date}. Please try again later. Goodbye.`;
       }
       let msg = "I found these trains: ";
       trains.forEach((t, i) => { msg += `${i + 1}. ${trainOptionLabel(t)}${t.time ? " at " + t.time : ""}. `; });
@@ -594,7 +649,14 @@ async function nextPrompt(session) {
       return msg;
     }
     if (session.trainOptions.every(isPlaceholderTrain)) {
-      if (!session.departureTime) return "Please tell me the train departure time.";
+      session.endCall = true;
+      if (/^no trains found$/i.test(session.trainOptions[0].name || "")) {
+        return `Sorry, I could not find any trains from ${session.from} to ${session.to} on ${session.date}. Please call again with a different station or date. Goodbye.`;
+      }
+      if (/^train service quota exceeded$/i.test(session.trainOptions[0].name || "")) {
+        return "Sorry, the train lookup service quota is exhausted right now. Please try again after upgrading or renewing the RapidAPI plan. Goodbye.";
+      }
+      return `Sorry, I could not complete the train lookup for ${session.from} to ${session.to} on ${session.date}. Please try again later. Goodbye.`;
     } else {
       return "Please tell me which train you prefer by number or name.";
     }
@@ -604,6 +666,7 @@ async function nextPrompt(session) {
 
   if (!session.name) return "What is the passenger name?";
   if (!session.age)  return "What is the passenger age?";
+  if (!session.seat) return "What type of seat do you prefer? Say window, aisle, lower, middle, upper, or any seat. You can also press 1 for window, 2 for aisle, 3 for lower, 4 for middle, 5 for upper, or 6 for any.";
 
   if (!canStillPay(session))
     return "Sorry, the payment window has closed. Please choose another train.";
@@ -611,6 +674,7 @@ async function nextPrompt(session) {
   return (
     `You are traveling from ${session.from} to ${session.to} on ${session.date} ` +
     `by ${session.trainSelected} at ${session.departureTime}. ` +
+    `${session.travelClass} class, ${session.seat} seat. ` +
     `Passenger ${session.name}, age ${session.age}. ` +
     `Please say confirm to proceed or cancel to restart.`
   );
@@ -627,13 +691,22 @@ function xml(v) {
     .replace(/'/g, "&apos;");
 }
 
+const SPEECH_HINTS = [
+  "reserved", "reservation", "unreserved", "general", "local",
+  "sleeper", "AC chair car", "chair car", "first AC", "second AC", "third AC",
+  "1A", "2A", "3A", "2S", "second sitting", "first class", "second class",
+  "window", "aisle", "lower", "middle", "upper", "any seat",
+  "confirm", "cancel", "Delhi", "Mumbai", "Chennai", "Bengaluru", "Bangalore",
+  "Kolkata", "Hyderabad", "Pune", "Ahmedabad", "Jaipur", "Lucknow"
+].join(",");
+
 // Twilio TwiML: Gather (speech + DTMF)
 function twimlGather(message, baseUrl, lang = "en-IN") {
   const processUrl = `${baseUrl}/voice/process`;
   const incomingUrl = `${baseUrl}/voice/incoming`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Gather input="speech dtmf" action="${xml(processUrl)}" method="POST" timeout="10" speechTimeout="auto" actionOnEmptyResult="true" language="${lang}" hints="reserved,unreserved,confirm,cancel,Delhi,Mumbai,Chennai,Bengaluru,Kolkata,Hyderabad,Pune,Ahmedabad,Jaipur,Lucknow">
+  <Gather input="speech dtmf" action="${xml(processUrl)}" method="POST" timeout="7" speechTimeout="2" actionOnEmptyResult="true" language="${lang}" speechModel="phone_call" enhanced="true" profanityFilter="false" hints="${xml(SPEECH_HINTS)}">
     <Say voice="alice" language="${lang}">${xml(message)}</Say>
   </Gather>
   <Say voice="alice" language="${lang}">I did not hear anything. Let me try again.</Say>
@@ -650,19 +723,82 @@ function twimlSay(message, lang = "en-IN") {
 </Response>`;
 }
 
-function extractSpeech(body) {
-  const raw = String(
+function normalizeHeardSpeech(text) {
+  let value = String(text || "").trim();
+  if (!value) return "";
+  const replacements = [
+    [/\breserve\b/gi, "reserved"],
+    [/\breservation\b/gi, "reserved"],
+    [/\bun reserve(?:d)?\b/gi, "unreserved"],
+    [/\bnon reserved\b/gi, "unreserved"],
+    [/\bsleeper class\b/gi, "sleeper"],
+    [/\bslipper\b/gi, "sleeper"],
+    [/\bthree ac\b/gi, "3 AC"],
+    [/\bthird ac\b/gi, "3 AC"],
+    [/\btwo ac\b/gi, "2 AC"],
+    [/\bsecond ac\b/gi, "2 AC"],
+    [/\bone ac\b/gi, "first AC"],
+    [/\bfirst a c\b/gi, "first AC"],
+    [/\ba c chair car\b/gi, "AC chair car"],
+    [/\bwindow side\b/gi, "window"],
+    [/\baisle side\b/gi, "aisle"]
+  ];
+  for (const [pattern, replacement] of replacements) value = value.replace(pattern, replacement);
+  return value;
+}
+
+function mapDigitsForSession(session, digits) {
+  const value = String(digits || "").trim();
+  if (!value) return "";
+  if (value === "0") return "cancel";
+  if (value === "9") return "confirm";
+
+  if (!session.journeyType) {
+    return ({ "1": "reserved", "2": "unreserved" })[value] || value;
+  }
+
+  if (!session.travelClass) {
+    if (session.journeyType === "Unreserved") {
+      return ({ "1": "general", "2": "second sitting" })[value] || value;
+    }
+    return ({
+      "1": "sleeper",
+      "2": "AC chair car",
+      "3": "3 AC",
+      "4": "2 AC",
+      "5": "first AC",
+      "6": "first class",
+      "7": "second sitting"
+    })[value] || value;
+  }
+
+  if (needsTrainSelection(session)) return value;
+
+  if (!session.seat) {
+    return ({
+      "1": "window",
+      "2": "aisle",
+      "3": "lower",
+      "4": "middle",
+      "5": "upper",
+      "6": "any seat"
+    })[value] || value;
+  }
+
+  return value;
+}
+
+function extractSpeech(body, session) {
+  const digits = String(body.Digits || body.digits || "").trim();
+  if (digits) return mapDigitsForSession(session, digits);
+  return normalizeHeardSpeech(
     body.TranscriptionText ||
     body.SpeechResult ||
     body.speech ||
     body.text ||
     body.transcript ||
-    body.Digits ||
-    body.digits ||
     ""
-  ).trim();
-  const dtmfMap = { "1": "reserved", "2": "unreserved", "9": "confirm", "0": "cancel" };
-  return dtmfMap[raw] || raw;
+  );
 }
 
 function readBody(req) {
@@ -834,6 +970,8 @@ async function createPaymentLink(session, req) {
     date:         session.date,
     departureTime: session.departureTime,
     journeyType:   session.journeyType,
+    travelClass:   session.travelClass,
+    seat:          session.seat,
     passenger:     session.name,
     age:           session.age
   };
@@ -855,12 +993,14 @@ const SYSTEM_PROMPT = `You are a friendly Indian railway ticket booking voice as
 
 Your job is to collect these booking details one by one through natural conversation:
 1. Journey type: "Reserved" or "Unreserved" (local/general = Unreserved; sleeper/AC/chair car = Reserved)
-2. Source station (from): one of Delhi, Mumbai, Chennai, Bengaluru, Kolkata, Hyderabad, Pune, Ahmedabad, Jaipur, Lucknow
-3. Destination station (to): one of the same list above
-4. Travel date: in YYYY-MM-DD format (interpret "today", "tomorrow", "kal", "aaj" etc. relative to the current date which is {{TODAY}})
-5. Departure time: in HH:MM 24-hour format (interpret "9:30 AM" as "09:30", "2 PM" as "14:00")
-6. Passenger name
-7. Passenger age
+2. Travel class: General, Second Sitting, Sleeper, AC Chair Car, AC 3 Tier, AC 2 Tier, First AC, First Class, or Second Class
+3. Source station (from): one of Delhi, Mumbai, Chennai, Bengaluru, Kolkata, Hyderabad, Pune, Ahmedabad, Jaipur, Lucknow
+4. Destination station (to): one of the same list above
+5. Travel date: in YYYY-MM-DD format (interpret "today", "tomorrow", "kal", "aaj" etc. relative to the current date which is {{TODAY}})
+6. Departure time: in HH:MM 24-hour format (interpret "9:30 AM" as "09:30", "2 PM" as "14:00")
+7. Passenger name
+8. Passenger age
+9. Seat preference: Window, Aisle, Lower, Middle, Upper, or Any
 
 Rules:
 - Be conversational, warm, and concise. Keep responses to 1-2 sentences.
@@ -877,18 +1017,20 @@ Respond ONLY with a JSON object in this exact format (no extra text, no markdown
   "reply": "Your conversational response to the user",
   "slots": {
     "journeyType": "",
+    "travelClass": "",
     "from": "",
     "to": "",
     "date": "",
     "departureTime": "",
     "name": "",
-    "age": ""
+    "age": "",
+    "seat": ""
   },
   "confirmed": false,
   "reset": false
 }
 
-The "slots" object should contain ALL slot values collected so far across the entire conversation (not just from the latest message). Leave a slot as "" if not yet known. Use the canonical station names (Delhi, Mumbai, Chennai, Bengaluru, Kolkata, Hyderabad, Pune, Ahmedabad, Jaipur, Lucknow). Use "Reserved" or "Unreserved" for journeyType.`;
+The "slots" object should contain ALL slot values collected so far across the entire conversation (not just from the latest message). Leave a slot as "" if not yet known. Use the canonical station names (Delhi, Mumbai, Chennai, Bengaluru, Kolkata, Hyderabad, Pune, Ahmedabad, Jaipur, Lucknow). Use "Reserved" or "Unreserved" for journeyType. Use the canonical travel class and seat preference values listed above.`;
 
 function buildSystemPrompt() {
   const today   = new Date();
@@ -952,12 +1094,14 @@ function parseGeminiResponse(raw) {
       reply:     parsed.reply || "",
       slots: {
         journeyType:   parsed.slots?.journeyType   || "",
+        travelClass:   parsed.slots?.travelClass   || "",
         from:          parsed.slots?.from          || "",
         to:            parsed.slots?.to            || "",
         date:          parsed.slots?.date          || "",
         departureTime: parsed.slots?.departureTime || "",
         name:          parsed.slots?.name          || "",
-        age:           parsed.slots?.age           || ""
+        age:           parsed.slots?.age           || "",
+        seat:          parsed.slots?.seat          || ""
       },
       confirmed: Boolean(parsed.confirmed),
       reset:     Boolean(parsed.reset)
@@ -965,7 +1109,7 @@ function parseGeminiResponse(raw) {
   } catch {
     return {
       reply:     raw.trim(),
-      slots:     { journeyType: "", from: "", to: "", date: "", departureTime: "", name: "", age: "" },
+      slots:     { journeyType: "", travelClass: "", from: "", to: "", date: "", departureTime: "", name: "", age: "", seat: "" },
       confirmed: false,
       reset:     false
     };
@@ -1039,7 +1183,8 @@ async function handleApi(req, res, url) {
     const session = {
       from: body.from, to: body.to, date: body.date,
       departureTime: body.departureTime, journeyType: body.journeyType,
-      name: body.name, age: body.age
+      travelClass: body.travelClass, name: body.name, age: body.age,
+      seat: body.seat
     };
     if (!isComplete(session))   { sendJson(res, 400, { ok: false, error: "Missing booking details." }); return; }
     if (!canStillPay(session))  { sendJson(res, 400, { ok: false, error: "Payment is closed — less than 15 minutes before departure." }); return; }
@@ -1118,12 +1263,14 @@ async function handleApi(req, res, url) {
         const session     = getSession(sessionId);
         const s           = parsed.slots;
         if (s.journeyType)   session.journeyType   = s.journeyType;
+        if (s.travelClass)   session.travelClass   = s.travelClass;
         if (s.from)          session.from          = s.from;
         if (s.to)            session.to            = s.to;
         if (s.date)          session.date          = s.date;
         if (s.departureTime) session.departureTime = s.departureTime;
         if (s.name)          session.name          = s.name;
         if (s.age)           session.age           = s.age;
+        if (s.seat)          session.seat          = s.seat;
         updateBooking(session, userMessage);
 
         const result = {
@@ -1132,12 +1279,14 @@ async function handleApi(req, res, url) {
           reply: parsed.reply,
           slots: {
             journeyType:   session.journeyType   || "",
+            travelClass:   session.travelClass   || "",
             from:          session.from          || "",
             to:            session.to            || "",
             date:          session.date          || "",
             departureTime: session.departureTime || "",
             name:          session.name          || "",
-            age:           session.age           || ""
+            age:           session.age           || "",
+            seat:          session.seat          || ""
           },
           confirmed: parsed.confirmed,
           reset: parsed.reset,
@@ -1182,7 +1331,7 @@ async function handleApi(req, res, url) {
       sendJson(res, 200, {
         ok: true, llm: false,
         reply:     "No problem, I have cleared the details. Please tell me your new journey.",
-        slots:     { journeyType: "", from: "", to: "", date: "", departureTime: "", name: "", age: "" },
+        slots:     { journeyType: "", travelClass: "", from: "", to: "", date: "", departureTime: "", name: "", age: "", seat: "" },
         confirmed: false, reset: true, payment: null
       });
       return;
@@ -1205,12 +1354,14 @@ async function handleApi(req, res, url) {
         : await nextPrompt(session),
       slots: {
         journeyType:   session.journeyType   || "",
+        travelClass:   session.travelClass   || "",
         from:          session.from          || "",
         to:            session.to            || "",
         date:          session.date          || "",
         departureTime: session.departureTime || "",
         name:          session.name          || "",
-        age:           session.age           || ""
+        age:           session.age           || "",
+        seat:          session.seat          || ""
       },
       confirmed: Boolean(isConfirm && payment),
       reset:     false,
@@ -1273,6 +1424,7 @@ async function handleVoice(req, res, url) {
   const base = getBaseUrl(req);
   const renderGather = (message) => twimlGather(message, base);
   const renderSay    = (message) => twimlSay(message);
+  const renderPrompt = (message, session) => session && session.endCall ? renderSay(message) : renderGather(message);
 
   // GET or POST /voice/incoming — call starts
   if (url.pathname === "/voice/incoming") {
@@ -1301,9 +1453,9 @@ async function handleVoice(req, res, url) {
   // POST /voice/process — caller spoke or transcription arrived
   if (url.pathname === "/voice/process") {
     const body    = querystring.parse(await readBody(req));
-    const speech  = extractSpeech(body);
     const callSid = body.CallSid || body.callsid || body.CallId || "local-call";
     const session = getSession(callSid);
+    const speech  = extractSpeech(body, session);
 
     console.log(`[Call process] callSid=${callSid} speech="${speech}"`);
     if (!speech) {
@@ -1314,7 +1466,7 @@ async function handleVoice(req, res, url) {
     // Empty speech — re-prompt
     if (!speech) {
       const prompt = await nextPrompt(session) || "Please tell me your journey details.";
-      send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
+      send(res, 200, "text/xml; charset=utf-8", renderPrompt(prompt, session));
       return;
     }
 
@@ -1324,12 +1476,14 @@ async function handleVoice(req, res, url) {
         const parsed = await callGeminiVoice(callSid, speech);
         const s      = parsed.slots;
         if (s.journeyType)   session.journeyType   = s.journeyType;
+        if (s.travelClass)   session.travelClass   = s.travelClass;
         if (s.from)          session.from          = s.from;
         if (s.to)            session.to            = s.to;
         if (s.date)          session.date          = s.date;
         if (s.departureTime) session.departureTime = s.departureTime;
         if (s.name)          session.name          = s.name;
         if (s.age)           session.age           = s.age;
+        if (s.seat)          session.seat          = s.seat;
 
         updateBooking(session, speech);
 
@@ -1371,7 +1525,7 @@ async function handleVoice(req, res, url) {
         const replyText = (parsed.confirmed || needsTrainSelection(session))
           ? await nextPrompt(session)
           : parsed.reply || await nextPrompt(session);
-        send(res, 200, "text/xml; charset=utf-8", renderGather(replyText));
+        send(res, 200, "text/xml; charset=utf-8", renderPrompt(replyText, session));
         return;
       } catch (err) {
         console.error("[Gemini voice error]", err.message);
@@ -1391,7 +1545,8 @@ async function handleVoice(req, res, url) {
 
     if (/\b(confirm|yes|book|proceed|done|go ahead|haan|theek|ok)\b/i.test(speech)) {
       if (needsTrainSelection(session)) {
-        send(res, 200, "text/xml; charset=utf-8", renderGather(await nextPrompt(session)));
+        const prompt = await nextPrompt(session);
+        send(res, 200, "text/xml; charset=utf-8", renderPrompt(prompt, session));
         return;
       }
       if (!isComplete(session)) {
@@ -1423,7 +1578,7 @@ async function handleVoice(req, res, url) {
     }
 
     const prompt = await nextPrompt(session);
-    send(res, 200, "text/xml; charset=utf-8", renderGather(prompt));
+    send(res, 200, "text/xml; charset=utf-8", renderPrompt(prompt, session));
     return;
   }
 
@@ -1542,6 +1697,7 @@ function handleVoicebotSocket(req, socket) {
   };
 
   const handleSpeech = async (text) => {
+    text = normalizeHeardSpeech(text);
     if (!text) return;
     console.log(`[Voicebot ← caller] "${text}"`);
     voicebotEvents.push({ receivedAt: new Date().toISOString(), callSid, speech: text });
@@ -1610,8 +1766,7 @@ function handleVoicebotSocket(req, socket) {
         } else if (msg.event === "speech" && msg.text) {
           handleSpeech(msg.text).catch(console.error);
         } else if (msg.event === "dtmf" && msg.digit) {
-          const dtmfMap = { "1": "reserved", "2": "unreserved", "9": "confirm", "0": "cancel" };
-          handleSpeech(dtmfMap[String(msg.digit)] || msg.digit).catch(console.error);
+          handleSpeech(mapDigitsForSession(session, msg.digit)).catch(console.error);
         } else if (msg.event === "stop") {
           sessions.delete(callSid);
           socket.destroy();
@@ -1668,6 +1823,7 @@ function servePaymentPage(res, reference) {
     <h1>Ticket Payment</h1>
     <div class="ref">${xml(payment.reference)}</div>
     <p><strong>${xml(payment.journeyType)}</strong> journey</p>
+    <p><strong>${xml(payment.travelClass)}</strong> class · ${xml(payment.seat)} seat</p>
     <p>🚆 ${xml(payment.route)}</p>
     <p>📅 ${xml(payment.date)} at ${xml(payment.departureTime)}</p>
     <p>👤 ${xml(payment.passenger)}, age ${xml(payment.age)}</p>

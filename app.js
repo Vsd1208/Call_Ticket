@@ -21,8 +21,10 @@ const translations = {
     missingDate: "What is your travel date?",
     missingDepartureTime: "What is the train departure time?",
     missingJourneyType: "Is the journey reserved or unreserved, for example a local train?",
+    missingTravelClass: "What class would you like: sleeper, AC chair car, 3 AC, 2 AC, first AC, first class, second sitting, or general?",
     missingName: "What is the passenger name?",
     missingAge: "What is the passenger age?",
+    missingSeat: "What type of seat do you prefer: window, aisle, lower, middle, upper, or any seat?",
     ready: "I have all the details. Please confirm to send the payment link.",
     booked: "Your payment link is ready."
   },
@@ -33,8 +35,10 @@ const translations = {
     missingDate: "Yatra ki tareekh kya hai?",
     missingDepartureTime: "Train ka departure time kya hai?",
     missingJourneyType: "Yatra reserved hai ya unreserved, jaise local train?",
+    missingTravelClass: "Kaunsi class chahiye: sleeper, AC chair car, 3 AC, 2 AC, first AC, first class, second sitting, ya general?",
     missingName: "Yatri ka naam kya hai?",
     missingAge: "Yatri ki umar kya hai?",
+    missingSeat: "Kaunsi seat preference chahiye: window, aisle, lower, middle, upper, ya any seat?",
     ready: "Mere paas sabhi details hain. Payment link bhejne ke liye confirm kijiye.",
     booked: "Aapka payment link taiyar hai."
   }
@@ -57,6 +61,7 @@ const els = {
   date: document.querySelector("#travelDate"),
   departureTime: document.querySelector("#departureTime"),
   journeyType: document.querySelector("#journeyType"),
+  travelClass: document.querySelector("#travelClass"),
   name: document.querySelector("#passengerName"),
   age: document.querySelector("#passengerAge"),
   seat: document.querySelector("#seatPref"),
@@ -78,7 +83,7 @@ const els = {
 
 const state = {
   from: "", to: "", date: "", departureTime: "",
-  journeyType: "", name: "", age: "", seat: "Any",
+  journeyType: "", travelClass: "", name: "", age: "", seat: "",
   locale: "en-IN", recognition: null,
   sessionId: "web-" + Math.random().toString(36).slice(2) + Date.now(),
   llmAvailable: false, isSending: false
@@ -157,7 +162,20 @@ function fmtDate(d) { return `${d.getFullYear()}-${String(d.getMonth()+1).padSta
 function parseName(t) { const m=t.match(/\b(?:for|name is|passenger is|naam|नाम)\s+([a-zA-Z][a-zA-Z ]{1,28})(?:\s+age|\s+umar|$)/i); return m?m[1].replace(/\b(age|umar|seat|ticket|book)\b.*$/i,"").trim().replace(/\b\w/g,l=>l.toUpperCase()):""; }
 function parseDirectName(t) { const c=t.trim(); if(!/^[a-zA-Z][a-zA-Z ]{1,28}$/.test(c))return""; if(stations.some(s=>s.aliases.includes(normalize(c))))return""; return c.replace(/\b\w/g,l=>l.toUpperCase()); }
 function parseAge(t) { const m=t.match(/\b(?:age|aged|umar|उम्र)\s*(?:is)?\s*(\d{1,3})\b/i); if(m)return m[1]; const d=t.trim().match(/^(\d{1,3})$/); return d?d[1]:""; }
-function parseSeat(t) { if(/\bwindow\b|खिड़की/i.test(t))return"Window"; if(/\baisle\b/i.test(t))return"Aisle"; if(/\blower\b/i.test(t))return"Lower"; if(/\bupper\b/i.test(t))return"Upper"; return""; }
+function parseSeat(t) { if(/\b(any|no preference|no specific|koi bhi|koibhi)\b/i.test(t))return"Any"; if(/\bwindow\b/i.test(t))return"Window"; if(/\baisle\b/i.test(t))return"Aisle"; if(/\blower\b/i.test(t))return"Lower"; if(/\bupper\b/i.test(t))return"Upper"; if(/\bmiddle\b/i.test(t))return"Middle"; return""; }
+function parseTravelClass(t) {
+  const s=t.toLowerCase();
+  if(/\b(first ac|1a|first a c|ac first|a c first)\b/i.test(s))return"First AC";
+  if(/\b(second ac|2a|2 ac|two ac|a c two|ac 2 tier|2 tier ac|second a c)\b/i.test(s))return"AC 2 Tier";
+  if(/\b(third ac|3a|3 ac|three ac|a c three|ac 3 tier|3 tier ac|third a c)\b/i.test(s))return"AC 3 Tier";
+  if(/\b(ac chair car|cc|chair car|a c chair car)\b/i.test(s))return"AC Chair Car";
+  if(/\b(sleeper|sl)\b/i.test(s))return"Sleeper";
+  if(/\b(second sitting|2s|second seater|sitting)\b/i.test(s))return"Second Sitting";
+  if(/\b(first class|fc)\b/i.test(s))return"First Class";
+  if(/\b(general|unreserved|ordinary)\b/i.test(s))return"General";
+  if(/\b(second class)\b/i.test(s))return"Second Class";
+  return"";
+}
 function parseJourneyType(t) { if(/\b(unreserved|general|local|suburban|ordinary)\b|लोकल|जनरल/i.test(t))return"Unreserved"; if(/\b(reserved|reservation|sleeper|chair car|ac|confirmed seat)\b|आरक्षित/i.test(t))return"Reserved"; return""; }
 function parseDepartureTime(t) {
   const s=t.toLowerCase(); let m=s.match(/\b(?:at|time|departure|departing|leaves|train time)\s*(?:is)?\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i);
@@ -174,17 +192,19 @@ function localUpdateFromText(raw) {
   if(!state.from&&all[0])state.from=all[0];
   if(!state.to&&all.find(s=>s!==state.from))state.to=all.find(s=>s!==state.from);
   const date=parseDate(t), name=parseName(raw)||(!state.name&&state.from&&state.to&&state.date?parseDirectName(raw):"");
-  const age=parseAge(raw), seat=parseSeat(raw), jt=parseJourneyType(raw), dt=parseDepartureTime(raw);
+  const age=parseAge(raw), seat=parseSeat(raw), travelClass=parseTravelClass(raw), jt=parseJourneyType(raw), dt=parseDepartureTime(raw);
   if(date)state.date=date; if(name)state.name=name; if(age)state.age=age;
-  if(seat)state.seat=seat; if(jt)state.journeyType=jt; if(dt)state.departureTime=dt;
+  if(seat)state.seat=seat; if(travelClass)state.travelClass=travelClass; if(jt)state.journeyType=jt; if(dt)state.departureTime=dt;
 }
 
 function localNextPrompt() {
   const m = translations[state.locale] || translations["en-IN"];
-  if(!state.journeyType)return m.missingJourneyType; if(!state.from)return m.missingFrom;
+  if(!state.journeyType)return m.missingJourneyType; if(!state.travelClass)return m.missingTravelClass;
+  if(!state.from)return m.missingFrom;
   if(!state.to)return m.missingTo; if(!state.date)return m.missingDate;
-  if(!state.departureTime)return m.missingDepartureTime; if(!state.name)return m.missingName;
-  if(!state.age)return m.missingAge; return m.ready;
+  if(!state.departureTime)return m.missingDepartureTime;
+  if(!state.name)return m.missingName; if(!state.age)return m.missingAge;
+  if(!state.seat)return m.missingSeat; return m.ready;
 }
 
 /* ── UI helpers ────────────────────────────────────────────────────────── */
@@ -234,8 +254,10 @@ function updateSlotsUI(slots) {
   if (slots.date) state.date = slots.date;
   if (slots.departureTime) state.departureTime = slots.departureTime;
   if (slots.journeyType) state.journeyType = slots.journeyType;
+  if (slots.travelClass) state.travelClass = slots.travelClass;
   if (slots.name) state.name = slots.name;
   if (slots.age) state.age = slots.age;
+  if (slots.seat) state.seat = slots.seat;
   refreshDetails();
 }
 
@@ -245,17 +267,18 @@ function refreshDetails() {
   els.date.textContent = state.date || "Waiting";
   els.departureTime.textContent = state.departureTime || "Waiting";
   els.journeyType.textContent = state.journeyType || "Waiting";
+  els.travelClass.textContent = state.travelClass || "Waiting";
   els.name.textContent = state.name || "Waiting";
   els.age.textContent = state.age || "Waiting";
-  els.seat.textContent = state.seat || "Any";
+  els.seat.textContent = state.seat || "Waiting";
   els.paymentDeadline.textContent = "—";
-  const allFilled = state.journeyType && state.from && state.to && state.date && state.departureTime && state.name && state.age;
+  const allFilled = state.journeyType && state.travelClass && state.from && state.to && state.date && state.departureTime && state.name && state.age && state.seat;
   els.book.disabled = !allFilled;
 }
 
 function resetState() {
   state.from = ""; state.to = ""; state.date = ""; state.departureTime = "";
-  state.journeyType = ""; state.name = ""; state.age = ""; state.seat = "Any";
+  state.journeyType = ""; state.travelClass = ""; state.name = ""; state.age = ""; state.seat = "";
   state.sessionId = "web-" + Math.random().toString(36).slice(2) + Date.now();
   els.conversation.querySelectorAll(".message").forEach(m => m.remove());
   els.ticketCard.hidden = true;
@@ -266,7 +289,7 @@ function resetState() {
 function showTicket(payment) {
   els.ticketRoute.textContent = `${state.from} to ${state.to}`;
   els.ticketId.textContent = payment.reference;
-  els.ticketMeta.textContent = `${state.journeyType} | ${state.name}, age ${state.age} | ${state.date} ${state.departureTime} | Seat: ${state.seat} | Rs ${payment.amount} | Pay before ${payment.deadline}`;
+  els.ticketMeta.textContent = `${state.journeyType} | ${state.travelClass} class | ${state.name}, age ${state.age} | ${state.date} ${state.departureTime} | Seat: ${state.seat} | Rs ${payment.amount} | Pay before ${payment.deadline}`;
   els.paymentLink.href = payment.url;
   els.paymentLink.toggleAttribute("hidden", !payment.url || payment.url === "#");
   els.ticketCard.hidden = false;
@@ -302,7 +325,7 @@ async function receiveCallerText(text) {
     // Handle reset
     if (data.reset) {
       state.from = ""; state.to = ""; state.date = ""; state.departureTime = "";
-      state.journeyType = ""; state.name = ""; state.age = ""; state.seat = "Any";
+      state.journeyType = ""; state.travelClass = ""; state.name = ""; state.age = ""; state.seat = "";
       state.sessionId = "web-" + Math.random().toString(36).slice(2) + Date.now();
       els.ticketCard.hidden = true;
       refreshDetails();
@@ -339,7 +362,7 @@ async function bookTicketLocal() {
   try {
     const res = await fetch("/api/payment/create", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ from: state.from, to: state.to, date: state.date, departureTime: state.departureTime, journeyType: state.journeyType, name: state.name, age: state.age })
+      body: JSON.stringify({ from: state.from, to: state.to, date: state.date, departureTime: state.departureTime, journeyType: state.journeyType, travelClass: state.travelClass, name: state.name, age: state.age, seat: state.seat })
     });
     const result = await res.json();
     if (res.ok && result.ok) payment = result.payment;
@@ -440,3 +463,5 @@ els.callNowForm.addEventListener("submit", (e) => {
 refreshDetails();
 checkLlmStatus();
 loadCallProviderStatus();
+
+
